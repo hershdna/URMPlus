@@ -44,6 +44,12 @@ init -2 python in x52URM:
             self._nodeColumns = {}
             self._edgesByNode = {}
             self._statementLabels = {}
+            # Keep an object-id map as well as the statement-name map. Ren'Py
+            # uses opaque tuple names for most executable statements, and a
+            # few third-party statement implementations can leave ``name``
+            # unset. The live Context.current value can still be resolved by
+            # looking up its AST object and using this map.
+            self._statementObjectLabels = {}
             self._knownLabelNames = set()
             self._focusSignature = None
             self._pendingCenter = None
@@ -246,6 +252,10 @@ init -2 python in x52URM:
                         self._statementLabels[statementName] = mappedLabel
                     except:
                         pass
+                try:
+                    self._statementObjectLabels[id(node)] = sourceLabel
+                except:
+                    pass
                 nodeType = self._nodeType(node)
                 if nodeType == 'If':
                     entries = getattr(node, 'entries', []) or []
@@ -352,6 +362,7 @@ init -2 python in x52URM:
             self._nodeColumns = {}
             self._edgesByNode = {}
             self._statementLabels = {}
+            self._statementObjectLabels = {}
             self._focusSignature = None
             self._pendingCenter = None
             self._currentCacheKey = None
@@ -552,28 +563,81 @@ init -2 python in x52URM:
             self._focusSignature = None
 
         def _branchNames(self, anchor):
-            """Return the complete connected label flow for an anchor.
+            """Return the complete start-to-finish flow containing anchor.
 
-            Edges are followed in both directions so a current label includes
-            its incoming path, every downstream branch, and joins back into
-            the flow. This is cached per anchor: changing a checkbox or
+            A view-filter branch is not a one-level neighborhood. First walk
+            backwards through every incoming flow edge to find the entry
+            points. Then walk forwards from those entries through every
+            outgoing edge, retaining every conditional branch, join,
+            fall-through label, and terminal path. Cycles are guarded by the
+            visited sets. This is cached per anchor: changing a checkbox or
             redrawing the viewport does not walk the graph again.
             """
             if anchor in self._branchCache:
                 return self._branchCache[anchor]
-            branch = set([anchor])
+
+            # Phase 1: collect the complete upstream path and its roots.
+            upstream = set([anchor])
             pending = [anchor]
             while pending:
                 label = pending.pop()
                 for edge in self._edgesByNode.get(label, []):
-                    other = None
-                    if edge['source'] == label:
-                        other = edge['target']
-                    elif edge['target'] == label:
-                        other = edge['source']
-                    if other in self.byName and other not in branch:
-                        branch.add(other)
-                        pending.append(other)
+                    if edge['target'] != label:
+                        continue
+                    parent = edge['source']
+                    if parent in self.byName and parent not in upstream:
+                        upstream.add(parent)
+                        pending.append(parent)
+
+            roots = []
+            for label in upstream:
+                hasParent = False
+                for edge in self._edgesByNode.get(label, []):
+                    if edge['target'] == label and edge['source'] in upstream and edge['source'] != label:
+                        hasParent = True
+                        break
+                if not hasParent:
+                    roots.append(label)
+            if not roots:
+                # A wholly cyclic flow has no graph-theoretic root. The
+                # selected/current label is the deterministic entry point.
+                roots = [anchor]
+
+            # Phase 2: retain every downstream branch from every entry point.
+            branch = set(upstream)
+            forwardVisited = set()
+            pending = roots[:]
+            while pending:
+                label = pending.pop()
+                if label in forwardVisited:
+                    continue
+                forwardVisited.add(label)
+                for edge in self._edgesByNode.get(label, []):
+                    if edge['source'] != label:
+                        continue
+                    child = edge['target']
+                    if child in self.byName:
+                        branch.add(child)
+                        if child not in forwardVisited:
+                            pending.append(child)
+
+            # If a cyclic edge bypasses the root walk, still include all flow
+            # reachable from the anchor itself.
+            pending = [anchor]
+            while pending:
+                label = pending.pop()
+                if label in forwardVisited:
+                    continue
+                forwardVisited.add(label)
+                for edge in self._edgesByNode.get(label, []):
+                    if edge['source'] != label:
+                        continue
+                    child = edge['target']
+                    if child in self.byName:
+                        branch.add(child)
+                        if child not in forwardVisited:
+                            pending.append(child)
+
             self._branchCache[anchor] = branch
             return branch
 
@@ -582,8 +646,11 @@ init -2 python in x52URM:
 
             Search navigation chooses one searched result as the active search
             anchor, while Current chooses the active in-game label. Each
-            enabled anchor contributes its full connected label flow rather
-            than only the anchor and one adjacent node.
+            enabled anchor contributes its full start-to-finish label flow
+            rather than only the anchor and one adjacent node. The searched
+            branch is the flow containing the active search result (the
+            selected result, or the first result until Previous/Next selects
+            another).
             """
             anchors = []
             results = self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal) if query else []
@@ -697,9 +764,13 @@ init -2 python in x52URM:
             currentStatement = None
             callbackLabel = None
             try:
-                currentStatement = getattr(renpy.context(), 'current', None)
+                # Ren'Py 7.4's public renpy.context() returns the saveable
+                # context-info object; it does not expose the executing AST
+                # statement. The live execution Context is the object used
+                # by the engine for Context.current (see execution.py).
+                currentStatement = getattr(renpy.game.context(), 'current', None)
             except:
-                pass
+                currentStatement = None
             try:
                 callbackLabel = LabelMon.lastLabel
             except:
@@ -733,7 +804,17 @@ init -2 python in x52URM:
             for candidate in candidates:
                 if candidate in helperLabels:
                     continue
-                mapped = self._statementLabels.get(candidate, candidate)
+                mapped = self._statementLabels.get(candidate, None)
+                if mapped is None:
+                    try:
+                        statementNode = renpy.game.script.lookup(candidate)
+                        mapped = self._statementObjectLabels.get(id(statementNode), None)
+                        if mapped is None and self._nodeType(statementNode) == 'Label':
+                            mapped = getattr(statementNode, 'name', None)
+                    except:
+                        mapped = None
+                if mapped is None and isinstance(candidate, basestring):
+                    mapped = candidate
                 if mapped in self.byName and mapped not in helperLabels:
                     self._currentCacheKey = cacheKey
                     self._currentCacheValue = mapped
