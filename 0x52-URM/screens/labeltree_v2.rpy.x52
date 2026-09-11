@@ -53,6 +53,54 @@ init -2 python in x52URM:
             self._searchCacheResults = []
             self._searchAllResults = []
             self._labelNamesCache = None
+            self._branchCache = {}
+
+        # These are persistent UI preferences, kept under a mod-specific
+        # attribute instead of the game's store. The screen still mirrors the
+        # values into local variables so Ren'Py updates immediately.
+        _filterDefaults = {
+            'filterLabels': True,
+            'filterVariables': True,
+            'filterConditions': True,
+            'filterLinks': True,
+            'filterStatements': True,
+            'showInternal': False,
+            'showSearchedBranches': False,
+            'showCurrentBranch': True,
+        }
+
+        def getFilter(self, name, fallback=None):
+            if fallback is None:
+                fallback = self._filterDefaults.get(name, False)
+            try:
+                settings = getattr(renpy.game.persistent, '_x52URM_labeltree_filters', None)
+                if settings is not None:
+                    return bool(settings[name])
+            except:
+                pass
+            return bool(fallback)
+
+        def setFilter(self, name, value):
+            if name not in self._filterDefaults:
+                return
+            try:
+                oldSettings = getattr(renpy.game.persistent, '_x52URM_labeltree_filters', None)
+                settings = {}
+                if oldSettings is not None:
+                    for key in self._filterDefaults:
+                        try:
+                            settings[key] = bool(oldSettings[key])
+                        except:
+                            pass
+                settings[name] = bool(value)
+                setattr(renpy.game.persistent, '_x52URM_labeltree_filters', settings)
+                # Persist immediately: users should not lose their view when
+                # they close/reopen the overlay or restart the game.
+                renpy.save_persistent()
+            except:
+                # A read-only or unusual persistent backend must not make the
+                # Label Tree unusable; the screen-local value still applies.
+                pass
 
         # The game defines a Character named `max`, which shadows Python's
         # built-in max() in this dynamically loaded namespace. Keep layout
@@ -183,7 +231,10 @@ init -2 python in x52URM:
             })
 
         def _scan(self, statements, sourceLabel, conditions, details, edges, depth=0):
-            if not statements or depth > 80:
+            # Ren'Py's compiled AST is finite here: recursion follows nested
+            # statement blocks, not runtime jumps. Do not truncate at an
+            # arbitrary depth, or deeply nested in-label branches disappear.
+            if not statements:
                 return
             for node in statements:
                 statementName = getattr(node, 'name', None)
@@ -229,7 +280,12 @@ init -2 python in x52URM:
                     verb = 'jump' if nodeType == 'Jump' else 'call'
                     shown = verb + ' ' + (target or 'expression')
                     self._addDetail(details, 'link', shown, node, ' and '.join(conditions) if conditions else 'always', target)
-                    if target and renpy.has_label(target):
+                    # The complete label index was obtained from Ren'Py before
+                    # the background build started. Use it as the edge source
+                    # of truth rather than calling has_label for every link;
+                    # this also keeps dynamically loaded/overridden labels in
+                    # the same graph as the labels returned by get_all_labels.
+                    if target and target in self._knownLabelNames:
                         edges.append({
                             'source': sourceLabel,
                             'target': target,
@@ -238,6 +294,34 @@ init -2 python in x52URM:
                         })
                 elif nodeType == 'Label':
                     self._scan(getattr(node, 'block', None), sourceLabel, conditions, details, edges, depth + 1)
+
+        def _fallthroughLabel(self, label):
+            """Find the next top-level label in Ren'Py's compiled chain.
+
+            Ren'Py chains the final statement in a label block to the next
+            top-level statement. Explicit jumps/calls are not the only flow:
+            a label can fall through into the next label when its block ends.
+            Include that edge so a full branch matches actual script flow.
+            """
+            block = getattr(label, 'block', None) or []
+            cursor = getattr(block[-1], 'next', None) if block else getattr(label, 'next', None)
+            seen = set()
+            steps = 0
+            while cursor is not None and steps < 512:
+                nodeType = self._nodeType(cursor)
+                name = getattr(cursor, 'name', None)
+                if nodeType == 'Label' and name in self._knownLabelNames:
+                    return name
+                try:
+                    marker = id(cursor)
+                    if marker in seen:
+                        return None
+                    seen.add(marker)
+                except:
+                    pass
+                cursor = getattr(cursor, 'next', None)
+                steps += 1
+            return None
 
         def _labelNames(self):
             if self._labelNamesCache is not None:
@@ -275,6 +359,7 @@ init -2 python in x52URM:
             self._searchCacheKey = None
             self._searchCacheResults = []
             self._searchAllResults = []
+            self._branchCache = {}
             self.labels = names
             self.nodes = []
             self.edges = []
@@ -294,6 +379,14 @@ init -2 python in x52URM:
                     label = renpy.game.script.lookup(name)
                     self._statementLabels[name] = name
                     self._scan(getattr(label, 'block', None), name, [], details, edges)
+                    nextLabel = self._fallthroughLabel(label)
+                    if nextLabel and nextLabel != name:
+                        edges.append({
+                            'source': name,
+                            'target': nextLabel,
+                            'condition': 'always',
+                            'kind': 'flow',
+                        })
                 except:
                     pass
                 deduped = []
@@ -458,14 +551,39 @@ init -2 python in x52URM:
             self._nodeColumns = groups
             self._focusSignature = None
 
-        def _focusedNames(self, query='', labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False, showSearched=True, showCurrent=True):
-            """Return only the active label paths plus their immediate branches.
+        def _branchNames(self, anchor):
+            """Return the complete connected label flow for an anchor.
 
-            The complete graph remains cached in self.nodes/self.edges. The
-            viewport deliberately receives a small, readable subgraph: the
-            selected search result (or current label), every ancestor leading
-            to it, and its immediate outgoing branches. Search navigation
-            changes the anchor without rebuilding the compiled label data.
+            Edges are followed in both directions so a current label includes
+            its incoming path, every downstream branch, and joins back into
+            the flow. This is cached per anchor: changing a checkbox or
+            redrawing the viewport does not walk the graph again.
+            """
+            if anchor in self._branchCache:
+                return self._branchCache[anchor]
+            branch = set([anchor])
+            pending = [anchor]
+            while pending:
+                label = pending.pop()
+                for edge in self._edgesByNode.get(label, []):
+                    other = None
+                    if edge['source'] == label:
+                        other = edge['target']
+                    elif edge['target'] == label:
+                        other = edge['source']
+                    if other in self.byName and other not in branch:
+                        branch.add(other)
+                        pending.append(other)
+            self._branchCache[anchor] = branch
+            return branch
+
+        def _focusedNames(self, query='', labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False, showSearched=True, showCurrent=True):
+            """Return complete flows selected by the active view filters.
+
+            Search navigation chooses one searched result as the active search
+            anchor, while Current chooses the active in-game label. Each
+            enabled anchor contributes its full connected label flow rather
+            than only the anchor and one adjacent node.
             """
             anchors = []
             results = self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal) if query else []
@@ -481,23 +599,9 @@ init -2 python in x52URM:
             if not anchors:
                 return set()
 
-            focused = set(anchors)
-            pending = list(anchors)
-            # Keep the complete ancestor path for each active anchor.
-            while pending:
-                child = pending.pop()
-                for edge in self._edgesByNode.get(child, []):
-                    if edge['target'] != child:
-                        continue
-                    parent = edge['source']
-                    if parent in self.byName and parent not in focused:
-                        focused.add(parent)
-                        pending.append(parent)
-            # Show the first branch level after each active anchor as context.
+            focused = set()
             for anchor in anchors:
-                for edge in self._edgesByNode.get(anchor, []):
-                    if edge['source'] == anchor and edge['target'] in self.byName:
-                        focused.add(edge['target'])
+                focused.update(self._branchNames(anchor))
             return focused
 
         def _layoutFocus(self, focusedNames):
@@ -693,10 +797,15 @@ init -2 python in x52URM:
             previousName, previousTime = self._lastClick
             self.selectedLabel = name
             self._lastClick = (name, now)
-            if previousName == name and now - previousTime < .38:
+            # Ren'Py buttons report each mouse activation separately; keep the
+            # first click as selection and treat a second activation of the
+            # same node within a forgiving native double-click interval as a
+            # jump. Returning a value also ends the screen interaction cleanly.
+            if previousName == name and now - previousTime < .65:
                 self._lastClick = (None, 0)
                 renpy.hide_screen('URM_main')
                 renpy.jump(name)
+                return True
             else:
                 renpy.restart_interaction()
 
@@ -885,18 +994,18 @@ screen URM_labeltree_content():
     # Match the working URM search fields: keyboard builds start focused, while
     # touch builds wait for an explicit tap on the field.
     default searchInput = x52URM.Input(autoFocus=not renpy.variant('touch'))
-    default showInternal = False
-    default filterLabels = True
-    default filterVariables = True
-    default filterConditions = True
-    default filterLinks = True
-    default filterStatements = True
+    default showInternal = x52URM.LabelTree.getFilter('showInternal', False)
+    default filterLabels = x52URM.LabelTree.getFilter('filterLabels', True)
+    default filterVariables = x52URM.LabelTree.getFilter('filterVariables', True)
+    default filterConditions = x52URM.LabelTree.getFilter('filterConditions', True)
+    default filterLinks = x52URM.LabelTree.getFilter('filterLinks', True)
+    default filterStatements = x52URM.LabelTree.getFilter('filterStatements', True)
     default queryText = ''
     default allSearchResults = []
     default resultsPaneOpen = True
     default viewFilterOpen = False
-    default showSearchedBranches = True
-    default showCurrentBranch = True
+    default showSearchedBranches = x52URM.LabelTree.getFilter('showSearchedBranches', False)
+    default showCurrentBranch = x52URM.LabelTree.getFilter('showCurrentBranch', True)
 
     python:
         x52URM.LabelTree.ensureBuilt(8)
@@ -938,12 +1047,12 @@ screen URM_labeltree_content():
         hbox:
             spacing x52URM.scalePxInt(4)
             text 'Search in:' yalign .5 style_suffix 'description'
-            use x52URM_checkbox(filterLabels, '{urm_notl}Labels{/urm_notl}', SetLocalVariable('filterLabels', not filterLabels))
-            use x52URM_checkbox(filterVariables, '{urm_notl}Variables{/urm_notl}', SetLocalVariable('filterVariables', not filterVariables))
-            use x52URM_checkbox(filterConditions, '{urm_notl}Conditions{/urm_notl}', SetLocalVariable('filterConditions', not filterConditions))
-            use x52URM_checkbox(filterLinks, '{urm_notl}Links{/urm_notl}', SetLocalVariable('filterLinks', not filterLinks))
-            use x52URM_checkbox(filterStatements, '{urm_notl}Statements{/urm_notl}', SetLocalVariable('filterStatements', not filterStatements))
-            use x52URM_checkbox(showInternal, '{urm_notl}Internal{/urm_notl}', SetLocalVariable('showInternal', not showInternal))
+            use x52URM_checkbox(filterLabels, '{urm_notl}Labels{/urm_notl}', [SetLocalVariable('filterLabels', not filterLabels), Function(x52URM.LabelTree.setFilter, 'filterLabels', not filterLabels)])
+            use x52URM_checkbox(filterVariables, '{urm_notl}Variables{/urm_notl}', [SetLocalVariable('filterVariables', not filterVariables), Function(x52URM.LabelTree.setFilter, 'filterVariables', not filterVariables)])
+            use x52URM_checkbox(filterConditions, '{urm_notl}Conditions{/urm_notl}', [SetLocalVariable('filterConditions', not filterConditions), Function(x52URM.LabelTree.setFilter, 'filterConditions', not filterConditions)])
+            use x52URM_checkbox(filterLinks, '{urm_notl}Links{/urm_notl}', [SetLocalVariable('filterLinks', not filterLinks), Function(x52URM.LabelTree.setFilter, 'filterLinks', not filterLinks)])
+            use x52URM_checkbox(filterStatements, '{urm_notl}Statements{/urm_notl}', [SetLocalVariable('filterStatements', not filterStatements), Function(x52URM.LabelTree.setFilter, 'filterStatements', not filterStatements)])
+            use x52URM_checkbox(showInternal, '{urm_notl}Internal{/urm_notl}', [SetLocalVariable('showInternal', not showInternal), Function(x52URM.LabelTree.setFilter, 'showInternal', not showInternal)])
             null width x52URM.scalePxInt(8)
             textbutton '{urm_notl}Current{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.centerCurrentNow) hovered x52URM.Tooltip('{urm_notl}Center current label{/urm_notl}') unhovered x52URM.Tooltip()
             textbutton '{urm_notl}Selected{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.centerSelected) hovered x52URM.Tooltip('{urm_notl}Center selected node{/urm_notl}') unhovered x52URM.Tooltip()
@@ -1034,8 +1143,8 @@ screen URM_labeltree_content():
                             vbox:
                                 xfill True
                                 text '{urm_notl}Show branches{/urm_notl}' style_suffix 'description'
-                                use x52URM_checkbox(showSearchedBranches, '{urm_notl}Searched branches{/urm_notl}', SetLocalVariable('showSearchedBranches', not showSearchedBranches))
-                                use x52URM_checkbox(showCurrentBranch, '{urm_notl}Current branch{/urm_notl}', SetLocalVariable('showCurrentBranch', not showCurrentBranch))
+                                use x52URM_checkbox(showSearchedBranches, '{urm_notl}Searched branches{/urm_notl}', [SetLocalVariable('showSearchedBranches', not showSearchedBranches), Function(x52URM.LabelTree.setFilter, 'showSearchedBranches', not showSearchedBranches)])
+                                use x52URM_checkbox(showCurrentBranch, '{urm_notl}Current branch{/urm_notl}', [SetLocalVariable('showCurrentBranch', not showCurrentBranch), Function(x52URM.LabelTree.setFilter, 'showCurrentBranch', not showCurrentBranch)])
             if queryText and resultsPaneOpen:
                 frame:
                     xsize resultsPaneWidth
