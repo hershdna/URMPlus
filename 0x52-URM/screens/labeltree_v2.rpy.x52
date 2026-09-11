@@ -87,6 +87,15 @@ init -2 python in x52URM:
             text = self._safeText(value, '').strip()
             return text if text else 'else'
 
+        def _edgeCondition(self, conditions):
+            text = ' and '.join(conditions) if conditions else 'always'
+            if text == 'always':
+                return text
+            lowered = text.lower()
+            if lowered.startswith('if ') or lowered.startswith('elif ') or lowered.startswith('else '):
+                return text
+            return 'if ' + text
+
         def _nodeType(self, node):
             return type(node).__name__
 
@@ -191,7 +200,7 @@ init -2 python in x52URM:
                         edges.append({
                             'source': sourceLabel,
                             'target': target,
-                            'condition': ' and '.join(conditions) if conditions else 'always',
+                            'condition': self._edgeCondition(conditions),
                             'kind': verb,
                         })
                 elif nodeType == 'Label':
@@ -473,10 +482,10 @@ init -2 python in x52URM:
                 node = self.byName.get(name)
                 if node:
                     groups.setdefault(node.get('_column', 0), []).append(node)
-            levelGap = 72
-            siblingGap = 36
-            siblingRowGap = 24
-            nodeHeight = 82
+            levelGap = 112
+            siblingGap = 64
+            siblingRowGap = 42
+            nodeHeight = 86
             maxLevelWidth = 960
             graphWidth = 1000
             currentY = 30
@@ -522,6 +531,27 @@ init -2 python in x52URM:
                 name = self._pendingCenter
                 self._pendingCenter = None
                 self.center(name)
+
+        def _selectedPathNames(self):
+            target = self.selectedLabel if self.selectedLabel in self.byName else self.currentLabel()
+            if target not in self.byName:
+                return set()
+            path = set([target])
+            pending = [target]
+            while pending:
+                child = pending.pop()
+                for edge in self._edgesByNode.get(child, []):
+                    if edge['target'] != child:
+                        continue
+                    parent = edge['source']
+                    if parent in self.byName and parent not in path:
+                        path.add(parent)
+                        pending.append(parent)
+            return path
+
+        def isSelectedPathEdge(self, edge):
+            path = self._selectedPathNames()
+            return edge['source'] in path and edge['target'] in path
 
         def currentLabel(self):
             try:
@@ -750,8 +780,8 @@ init -2 python in x52URM:
             x2 = target['x'] + target['width'] / 2
             y2 = target['y']
             midY = (y1 + y2) / 2
-            labelWidth = 150
-            labelHeight = 30
+            labelWidth = 170
+            labelHeight = 36
             return {
                 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'midY': midY,
                 'leftX': self._min2(x1, x2),
@@ -849,10 +879,13 @@ screen URM_labeltree_content():
                     for edge in visibleEdges:
                         $ geometry = x52URM.LabelTree.edgeGeometry(edge)
                         if geometry:
-                            add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['x1'] - 1) ypos x52URM.scalePxInt(geometry['y1']) xsize x52URM.scalePxInt(2) ysize x52URM.scalePxInt(geometry['sourceLineHeight'])
-                            add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['leftX']) ypos x52URM.scalePxInt(geometry['midY'] - 1) xsize x52URM.scalePxInt(geometry['horizontalWidth']) ysize x52URM.scalePxInt(2)
-                            add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['x2'] - 1) ypos x52URM.scalePxInt(geometry['midY']) xsize x52URM.scalePxInt(2) ysize x52URM.scalePxInt(geometry['targetLineHeight'])
-                            frame xpos x52URM.scalePxInt(geometry['labelX']) ypos x52URM.scalePxInt(geometry['labelY']) xsize x52URM.scalePxInt(geometry['labelWidth']) ysize x52URM.scalePxInt(geometry['labelHeight']) background x52URM.Theme.colors.buttonBg:
+                            $ pathEdge = x52URM.LabelTree.isSelectedPathEdge(edge)
+                            $ edgeColor = x52URM.Theme.colors.buttonPrimaryBg if pathEdge else x52URM.Theme.colors.buttonSecondaryBg
+                            $ lineWidth = 6 if pathEdge else 4
+                            add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['x1'] - lineWidth / 2) ypos x52URM.scalePxInt(geometry['y1']) xsize x52URM.scalePxInt(lineWidth) ysize x52URM.scalePxInt(geometry['sourceLineHeight'])
+                            add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['leftX']) ypos x52URM.scalePxInt(geometry['midY'] - lineWidth / 2) xsize x52URM.scalePxInt(geometry['horizontalWidth']) ysize x52URM.scalePxInt(lineWidth)
+                            add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['x2'] - lineWidth / 2) ypos x52URM.scalePxInt(geometry['midY']) xsize x52URM.scalePxInt(lineWidth) ysize x52URM.scalePxInt(geometry['targetLineHeight'])
+                            frame xpos x52URM.scalePxInt(geometry['labelX']) ypos x52URM.scalePxInt(geometry['labelY']) xsize x52URM.scalePxInt(geometry['labelWidth']) ysize x52URM.scalePxInt(geometry['labelHeight']) background edgeColor:
                                 text geometry['condition'] size x52URM.scalePxInt(11) xalign .5 yalign .5 substitute False
                     for node in visibleNodes:
                         if showInternal or not node['internal'] or node['name'] == x52URM.LabelTree.currentLabel():
