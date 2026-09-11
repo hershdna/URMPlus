@@ -2,6 +2,8 @@
 
 init -2 python in x52URM:
     LabelTreeSourceLoaded = False
+    LabelTreeSourceHandoff = 0
+    LabelTreeContentScreen = 'URM_labeltree_content'
 
     def loadLabelTreeSource():
         global LabelTreeSourceLoaded
@@ -222,11 +224,15 @@ screen URM_labeltree_loader():
             if x52URM.loadLabelTreeSource():
                 renpy.restart_interaction()
     if x52URM.LabelTreeSourceLoaded:
-        # `use expression` takes an expression containing the screen name.
-        # Ren'Py 7.4 treats a quoted literal here as the literal name including
-        # its quote characters, so resolve the name through a screen variable.
-        $ labelTreeContentScreen = 'URM_labeltree_content'
-        use expression labelTreeContentScreen
+        # x52MF2.loadFile() adds the screen to the script during the current
+        # interaction. Give Ren'Py two interaction boundaries to finish
+        # installing the definition, then use the stable module-owned name.
+        if x52URM.LabelTreeSourceHandoff < 2:
+            $ x52URM.LabelTreeSourceHandoff += 1
+            python:
+                renpy.restart_interaction()
+        else:
+            use expression x52URM.LabelTreeContentScreen
     else:
         frame:
             xfill True
@@ -247,7 +253,7 @@ screen URM_warning():
         hbox:
             yoffset x52URM.scalePxInt(15)
             xalign 0.5
-            textbutton "{urm_notl}Got it!{/urm_notl}" style_suffix "buttonPrimary" action [Hide('URM_warning'),Show('URM_main')]
+            textbutton "{urm_notl}Got it!{/urm_notl}" style_suffix "buttonPrimary" action [x52URM.SetURMSetting('warningDisabled',True,globalSetting=True),x52URM.SetURMSetting('warningDisabled',True,globalSetting=False),Hide('URM_warning'),Show('URM_main')]
             null width x52URM.scalePxInt(10)
             textbutton "{urm_notl}Sure, don't warn me again{/urm_notl}" action [x52URM.SetURMSetting('warningDisabled',True,globalSetting=True),x52URM.SetURMSetting('warningDisabled',True,globalSetting=False),Hide('URM_warning'),Show('URM_main')]
 

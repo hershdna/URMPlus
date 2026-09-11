@@ -43,8 +43,34 @@ init -2 python in x52URM:
             self._buildProgress = 0
             self._nodeColumns = {}
             self._edgesByNode = {}
+            self._focusSignature = None
+            self._pendingCenter = None
             self._searchCacheKey = None
             self._searchCacheResults = []
+            self._searchAllResults = []
+            self._labelNamesCache = None
+
+        # The game defines a Character named `max`, which shadows Python's
+        # built-in max() in this dynamically loaded namespace. Keep layout
+        # comparisons local so they do not depend on store globals.
+        def _max2(self, left, right):
+            if left > right:
+                return left
+            return right
+
+        def _min2(self, left, right):
+            if left < right:
+                return left
+            return right
+
+        def _maxList(self, values):
+            if not values:
+                return 0
+            result = values[0]
+            for value in values[1:]:
+                if value > result:
+                    result = value
+            return result
 
         def _safeText(self, value, fallback=''):
             if value is None:
@@ -94,7 +120,7 @@ init -2 python in x52URM:
             lines = []
             start = 0
             while start < len(name) and len(lines) < maxLines:
-                end = min(len(name), start + width)
+                end = self._min2(len(name), start + width)
                 if end < len(name):
                     split = name.rfind('_', start + 1, end)
                     if split > start + (width // 2):
@@ -109,7 +135,7 @@ init -2 python in x52URM:
             # Reserve room for the type badge and expand control. Wider cards
             # keep long labels readable while the cap prevents a single label
             # from dominating the graph.
-            return max(210, min(420, 92 + len(name) * 7))
+            return self._max2(210, self._min2(420, 92 + len(name) * 7))
 
         def _addDetail(self, details, kind, text, node, condition=None, target=None):
             text = self._safeText(text).strip()
@@ -172,11 +198,14 @@ init -2 python in x52URM:
                     self._scan(getattr(node, 'block', None), sourceLabel, conditions, details, edges, depth + 1)
 
         def _labelNames(self):
+            if self._labelNamesCache is not None:
+                return self._labelNamesCache
             try:
                 names = list(renpy.get_all_labels())
             except:
                 names = []
-            return sorted(set([self._safeText(name) for name in names]), key=lambda name: name.lower())
+            self._labelNamesCache = sorted(set([self._safeText(name) for name in names]), key=lambda name: name.lower())
+            return self._labelNamesCache
 
         def _beginBuild(self, names, force=False):
             signature = tuple(names)
@@ -195,8 +224,11 @@ init -2 python in x52URM:
             self._buildProgress = 0
             self._nodeColumns = {}
             self._edgesByNode = {}
+            self._focusSignature = None
+            self._pendingCenter = None
             self._searchCacheKey = None
             self._searchCacheResults = []
+            self._searchAllResults = []
             self.labels = names
             self.nodes = []
             self.edges = []
@@ -207,7 +239,7 @@ init -2 python in x52URM:
         def _stepBuild(self, budget=8):
             if not self._building:
                 return
-            endIndex = min(len(self._buildNames), self._buildIndex + budget)
+            endIndex = self._min2(len(self._buildNames), self._buildIndex + budget)
             while self._buildIndex < endIndex:
                 name = self._buildNames[self._buildIndex]
                 details = []
@@ -260,6 +292,7 @@ init -2 python in x52URM:
                 self._edgesByNode.setdefault(edge['target'], []).append(edge)
             self._searchCacheKey = None
             self._searchCacheResults = []
+            self._searchAllResults = []
             self._signature = self._targetSignature
             self._building = False
             self._ready = True
@@ -289,13 +322,14 @@ init -2 python in x52URM:
             return self._buildProgress
 
         def refresh(self):
+            self._labelNamesCache = None
             self._beginBuild(self._labelNames(), force=True)
             renpy.restart_interaction()
 
         def _layout(self):
             names = [node['name'] for node in self.nodes]
             levels = dict((name, 0) for name in names)
-            for unused in range(min(12, len(names))):
+            for unused in range(self._min2(12, len(names))):
                 changed = False
                 for edge in self.edges:
                     if edge['source'] in levels and edge['target'] in levels:
@@ -308,35 +342,186 @@ init -2 python in x52URM:
             groups = {}
             for node in self.nodes:
                 groups.setdefault(levels.get(node['name'], 0), []).append(node)
-            xGap = 72
-            rowHeight = 104
-            maxRows = 1
-            for group in groups.values():
-                if len(group) > maxRows:
-                    maxRows = len(group)
-            maxLevel = 0
-            for level in groups:
-                if level > maxLevel:
-                    maxLevel = level
-            columnWidths = {}
+            # Lay the graph out vertically. The previous horizontal-column
+            # layout anchored level zero at the left edge, which made every
+            # connector run across the viewport and obscured the flow.
+            levelGap = 64
+            siblingGap = 32
+            siblingRowGap = 26
+            nodeHeight = 82
+            maxLevelWidth = 1400
+            levelRows = {}
+            levelHeights = {}
+            graphWidth = 1000
             for level, group in groups.items():
-                columnWidths[level] = max([self._nodeWidth(node['name']) for node in group])
-            columnStarts = {}
-            nextX = 30
-            for level in sorted(groups.keys()):
-                columnStarts[level] = nextX
-                nextX += columnWidths[level] + xGap
-            for level, group in groups.items():
-                for row, node in enumerate(group):
-                    node['_column'] = level
-                    node['x'] = columnStarts[level]
-                    node['y'] = 30 + row * rowHeight
+                group.sort(key=lambda node: node['name'].lower())
+                rows = []
+                currentRow = []
+                currentWidth = 0
+                for node in group:
                     node['width'] = self._nodeWidth(node['name'])
-                    node['height'] = 82
-            self._layoutRowHeight = rowHeight
-            self.graphWidth = max(900, nextX - xGap + 30)
-            self.graphHeight = max(540, 30 + maxRows * rowHeight)
+                    node['height'] = nodeHeight
+                    neededWidth = node['width'] if not currentRow else currentWidth + siblingGap + node['width']
+                    if currentRow and neededWidth > maxLevelWidth:
+                        rows.append(currentRow)
+                        currentRow = []
+                        currentWidth = 0
+                    currentRow.append(node)
+                    currentWidth = node['width'] if len(currentRow) == 1 else currentWidth + siblingGap + node['width']
+                if currentRow:
+                    rows.append(currentRow)
+                levelRows[level] = rows
+                levelHeight = len(rows) * nodeHeight + self._max2(0, len(rows) - 1) * siblingRowGap
+                levelHeights[level] = levelHeight
+                levelMaxWidth = 0
+                for row in rows:
+                    rowWidth = 0
+                    for index, node in enumerate(row):
+                        rowWidth += node['width']
+                        if index:
+                            rowWidth += siblingGap
+                    if rowWidth > levelMaxWidth:
+                        levelMaxWidth = rowWidth
+                if levelMaxWidth + 60 > graphWidth:
+                    graphWidth = levelMaxWidth + 60
+            graphWidth = self._max2(1000, self._min2(maxLevelWidth + 60, graphWidth))
+            sortedLevels = sorted(groups.keys())
+            currentY = 30
+            for level in sortedLevels:
+                for rowIndex, row in enumerate(levelRows[level]):
+                    totalWidth = 0
+                    for index, node in enumerate(row):
+                        totalWidth += node['width']
+                        if index:
+                            totalWidth += siblingGap
+                    startX = (graphWidth - totalWidth) / 2
+                    currentX = startX
+                    for node in row:
+                        node['_column'] = level
+                        node['x'] = currentX
+                        node['y'] = currentY + rowIndex * (nodeHeight + siblingRowGap)
+                        currentX += node['width'] + siblingGap
+                currentY += levelHeights[level] + levelGap
+            self._layoutRowHeight = nodeHeight + siblingRowGap
+            self.graphWidth = graphWidth
+            self.graphHeight = self._max2(540, currentY - levelGap + 30)
             self._nodeColumns = groups
+            self._focusSignature = None
+
+        def _focusedNames(self, query='', labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+            """Return only the active label paths plus their immediate branches.
+
+            The complete graph remains cached in self.nodes/self.edges. The
+            viewport deliberately receives a small, readable subgraph: the
+            selected search result (or current label), every ancestor leading
+            to it, and its immediate outgoing branches. Search navigation
+            changes the anchor without rebuilding the compiled label data.
+            """
+            anchors = []
+            results = self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal) if query else []
+            resultNames = set([node['name'] for node in results])
+            selected = self.selectedLabel if self.selectedLabel in self.byName else None
+            current = self.currentLabel()
+            if query and results:
+                if selected in resultNames:
+                    anchors.append(selected)
+                else:
+                    anchors.append(results[0]['name'])
+            elif selected:
+                anchors.append(selected)
+            elif current in self.byName:
+                anchors.append(current)
+            if current in self.byName and current not in anchors:
+                anchors.append(current)
+            if not anchors:
+                if self.nodes:
+                    anchors.append(self.nodes[0]['name'])
+                else:
+                    return set()
+
+            focused = set(anchors)
+            pending = list(anchors)
+            # Keep the complete ancestor path for each active anchor.
+            while pending:
+                child = pending.pop()
+                for edge in self._edgesByNode.get(child, []):
+                    if edge['target'] != child:
+                        continue
+                    parent = edge['source']
+                    if parent in self.byName and parent not in focused:
+                        focused.add(parent)
+                        pending.append(parent)
+            # Show the first branch level after each active anchor as context.
+            for anchor in anchors:
+                for edge in self._edgesByNode.get(anchor, []):
+                    if edge['source'] == anchor and edge['target'] in self.byName:
+                        focused.add(edge['target'])
+            return focused
+
+        def _layoutFocus(self, focusedNames):
+            """Compactly lay out the currently visible subgraph."""
+            signature = tuple(sorted(focusedNames))
+            if signature == self._focusSignature:
+                return
+            self._focusSignature = signature
+            if not focusedNames:
+                self.graphWidth = 1000
+                self.graphHeight = 540
+                return
+            groups = {}
+            for name in focusedNames:
+                node = self.byName.get(name)
+                if node:
+                    groups.setdefault(node.get('_column', 0), []).append(node)
+            levelGap = 72
+            siblingGap = 36
+            siblingRowGap = 24
+            nodeHeight = 82
+            maxLevelWidth = 960
+            graphWidth = 1000
+            currentY = 30
+            for level in sorted(groups.keys()):
+                group = groups[level]
+                group.sort(key=lambda node: node['name'].lower())
+                rows = []
+                currentRow = []
+                currentWidth = 0
+                for node in group:
+                    node['width'] = self._nodeWidth(node['name'])
+                    node['height'] = nodeHeight
+                    neededWidth = node['width'] if not currentRow else currentWidth + siblingGap + node['width']
+                    if currentRow and neededWidth > maxLevelWidth:
+                        rows.append(currentRow)
+                        currentRow = []
+                        currentWidth = 0
+                    currentRow.append(node)
+                    currentWidth = node['width'] if len(currentRow) == 1 else currentWidth + siblingGap + node['width']
+                if currentRow:
+                    rows.append(currentRow)
+                levelMaxWidth = 0
+                for rowIndex, row in enumerate(rows):
+                    rowWidth = 0
+                    for index, node in enumerate(row):
+                        rowWidth += node['width']
+                        if index:
+                            rowWidth += siblingGap
+                    levelMaxWidth = self._max2(levelMaxWidth, rowWidth)
+                    startX = (graphWidth - rowWidth) / 2
+                    currentX = startX
+                    for node in row:
+                        node['x'] = currentX
+                        node['y'] = currentY + rowIndex * (nodeHeight + siblingRowGap)
+                        currentX += node['width'] + siblingGap
+                graphWidth = self._max2(graphWidth, self._min2(maxLevelWidth + 60, 1080))
+                currentY += len(rows) * nodeHeight + self._max2(0, len(rows) - 1) * siblingRowGap + levelGap
+            self.graphWidth = graphWidth
+            self.graphHeight = self._max2(540, currentY - levelGap + 30)
+
+        def _applyPendingCenter(self):
+            if self._pendingCenter in self.byName:
+                name = self._pendingCenter
+                self._pendingCenter = None
+                self.center(name)
 
         def currentLabel(self):
             try:
@@ -360,27 +545,29 @@ init -2 python in x52URM:
             if name in self.byName:
                 self.selectedLabel = name
                 self._focusToken = (name, renpy.random.random())
-                self.centerSelected()
+                self._pendingCenter = name
                 renpy.restart_interaction()
 
         def center(self, name):
             node = self.byName.get(name)
             if not node:
                 return
-            self.xAdjustment.value = max(0, node.get('x', 0) * self.zoom - 420)
-            self.yAdjustment.value = max(0, node.get('y', 0) * self.zoom - 220)
+            nodeCenterX = node.get('x', 0) + node.get('width', 0) / 2
+            nodeCenterY = node.get('y', 0) + node.get('height', 0) / 2
+            self.xAdjustment.value = self._max2(0, nodeCenterX * self.zoom - 420)
+            self.yAdjustment.value = self._max2(0, nodeCenterY * self.zoom - 220)
 
         def centerSelected(self):
             name = self.selectedLabel or self.currentLabel()
             if name in self.byName:
-                self.center(name)
+                self._pendingCenter = name
                 self._focusToken = (name, renpy.random.random())
                 renpy.restart_interaction()
 
         def centerCurrentNow(self):
             current = self.currentLabel()
             if current in self.byName:
-                self.center(current)
+                self._pendingCenter = current
                 renpy.restart_interaction()
 
         def centerCurrent(self):
@@ -390,7 +577,7 @@ init -2 python in x52URM:
             if current and current != self._lastCenteredCurrent:
                 self._lastCenteredCurrent = current
                 if not self.selectedLabel:
-                    self.center(current)
+                    self._pendingCenter = current
 
         def nodeClicked(self, name):
             now = time.time()
@@ -405,16 +592,19 @@ init -2 python in x52URM:
                 renpy.restart_interaction()
 
         def zoomIn(self):
-            self.zoom = min(2.0, round(self.zoom + .1, 2))
+            self.zoom = self._min2(2.0, round(self.zoom + .1, 2))
             renpy.restart_interaction()
 
         def zoomOut(self):
-            self.zoom = max(.5, round(self.zoom - .1, 2))
+            self.zoom = self._max2(.5, round(self.zoom - .1, 2))
             renpy.restart_interaction()
 
         def zoomReset(self):
             self.zoom = 1.0
             renpy.restart_interaction()
+
+        def zoomPercentText(self):
+            return '%d%%' % (self.zoom * 100)
 
         def clearFocus(self):
             self.selectedLabel = None
@@ -451,21 +641,49 @@ init -2 python in x52URM:
             haystack = ' '.join(values)
             return query in haystack
 
-        def searchResults(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+        def _allSearchResults(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
             if not self._ready:
                 return []
             query = (query or '').strip().lower()
             cacheKey = (query, bool(labels), bool(variables), bool(conditions), bool(links), bool(statements), bool(showInternal))
             if cacheKey == self._searchCacheKey:
-                return self._searchCacheResults
+                return self._searchAllResults
             filters = {'labels': labels, 'variables': variables, 'conditions': conditions, 'links': links, 'statements': statements}
             results = []
             for node in self.nodes:
                 if self._matches(node, query, filters, showInternal):
                     results.append(node)
             self._searchCacheKey = cacheKey
+            self._searchAllResults = results
             self._searchCacheResults = results[:12]
+            return results
+
+        def searchResults(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+            self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal)
             return self._searchCacheResults
+
+        def searchResultsAll(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+            return self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal)
+
+        def searchResultCount(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+            return len(self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal))
+
+        def navigateSearch(self, query, direction, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+            results = self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal)
+            if not results:
+                self.selectedLabel = None
+                renpy.restart_interaction()
+                return
+            currentIndex = -1
+            for index, node in enumerate(results):
+                if node['name'] == self.selectedLabel:
+                    currentIndex = index
+                    break
+            if direction < 0:
+                nextIndex = len(results) - 1 if currentIndex <= 0 else currentIndex - 1
+            else:
+                nextIndex = 0 if currentIndex < 0 or currentIndex >= len(results) - 1 else currentIndex + 1
+            self.focus(results[nextIndex]['name'])
 
         def isSearchMatch(self, node, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
             query = (query or '').strip()
@@ -474,9 +692,12 @@ init -2 python in x52URM:
             filters = {'labels': labels, 'variables': variables, 'conditions': conditions, 'links': links, 'statements': statements}
             return self._matches(node, query, filters, showInternal)
 
-        def visibleNodes(self, showInternal=False):
+        def visibleNodes(self, showInternal=False, query='', labels=True, variables=True, conditions=True, links=True, statements=True):
             if not self._ready:
                 return []
+            focusedNames = self._focusedNames(query, labels, variables, conditions, links, statements, showInternal)
+            self._layoutFocus(focusedNames)
+            self._applyPendingCenter()
             try:
                 scale = float(scalePxInt(1))
             except:
@@ -493,23 +714,16 @@ init -2 python in x52URM:
             right = left + (renpy.config.screen_width / (scale * zoom)) + 640
             bottom = top + (renpy.config.screen_height / (scale * zoom)) + 640
             visible = []
-            rowHeight = getattr(self, '_layoutRowHeight', 104)
-            for column, group in self._nodeColumns.items():
-                if not group:
+            for name in focusedNames:
+                node = self.byName.get(name)
+                if not node:
                     continue
-                columnLeft = group[0]['x']
-                columnRight = max([node['x'] + node['width'] for node in group])
-                if columnRight < left or columnLeft > right:
+                if node['internal'] and not showInternal and node['name'] != self.currentLabel():
                     continue
-                firstRow = max(0, int((top - 30) / rowHeight) - 1)
-                lastRow = min(len(group) - 1, int((bottom - 30) / rowHeight) + 1)
-                for node in group[firstRow:lastRow + 1]:
-                    if node['internal'] and not showInternal and node['name'] != self.currentLabel():
-                        continue
-                    nodeRight = node['x'] + node['width']
-                    nodeBottom = node['y'] + node['height']
-                    if nodeRight >= left and node['x'] <= right and nodeBottom >= top and node['y'] <= bottom:
-                        visible.append(node)
+                nodeRight = node['x'] + node['width']
+                nodeBottom = node['y'] + node['height']
+                if nodeBottom >= top and node['y'] <= bottom and nodeRight >= left and node['x'] <= right:
+                    visible.append(node)
             return visible
 
         def visibleEdges(self, nodes):
@@ -518,6 +732,8 @@ init -2 python in x52URM:
             seen = set()
             for name in names:
                 for edge in self._edgesByNode.get(name, []):
+                    if edge['source'] not in names or edge['target'] not in names:
+                        continue
                     key = (edge['source'], edge['target'], edge['condition'], edge['kind'])
                     if key not in seen:
                         seen.add(key)
@@ -529,17 +745,21 @@ init -2 python in x52URM:
             target = self.byName.get(edge['target'])
             if not source or not target:
                 return None
-            x1 = source['x'] + source['width']
-            y1 = source['y'] + source['height'] / 2
-            x2 = target['x']
-            y2 = target['y'] + target['height'] / 2
-            midX = (x1 + x2) / 2
+            x1 = source['x'] + source['width'] / 2
+            y1 = source['y'] + source['height']
+            x2 = target['x'] + target['width'] / 2
+            y2 = target['y']
+            midY = (y1 + y2) / 2
             labelWidth = 150
             labelHeight = 30
             return {
-                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'midX': midX,
-                'labelX': midX - labelWidth / 2,
-                'labelY': (y1 + y2) / 2 - labelHeight / 2,
+                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'midY': midY,
+                'leftX': self._min2(x1, x2),
+                'horizontalWidth': self._max2(x1, x2) - self._min2(x1, x2) + 2,
+                'sourceLineHeight': midY - y1,
+                'targetLineHeight': y2 - midY,
+                'labelX': (x1 + x2) / 2 - labelWidth / 2,
+                'labelY': midY - labelHeight / 2,
                 'labelWidth': labelWidth,
                 'labelHeight': labelHeight,
                 'condition': edge['condition'],
@@ -561,14 +781,16 @@ screen URM_labeltree_content():
     default filterLinks = True
     default filterStatements = True
     default queryText = ''
-    default suggestedResults = []
+    default allSearchResults = []
+    default resultsPaneOpen = True
 
     python:
         x52URM.LabelTree.ensureBuilt(8)
         x52URM.LabelTree.centerCurrent()
         queryText = str(searchInput)
-        suggestedResults = x52URM.LabelTree.searchResults(queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
-        visibleNodes = x52URM.LabelTree.visibleNodes(showInternal)
+        allSearchResults = x52URM.LabelTree.searchResultsAll(queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
+        searchMatchCount = len(allSearchResults)
+        visibleNodes = x52URM.LabelTree.visibleNodes(showInternal, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements)
         visibleEdges = x52URM.LabelTree.visibleEdges(visibleNodes)
 
     key 'mousedown_4' action Function(x52URM.LabelTree.zoomIn)
@@ -591,28 +813,6 @@ screen URM_labeltree_content():
                     action searchInput.Enable()
                     input value searchInput
             textbutton '\ue880' style_suffix 'icon_button' action x52URM.LabelTree.clearFocus hovered x52URM.Tooltip('{urm_notl}Clear search focus{/urm_notl}') unhovered x52URM.Tooltip()
-        if queryText:
-            frame style_suffix 'seperator' ysize x52URM.scalePxInt(2)
-            vbox:
-                xfill True
-                text 'Matches: {}'.format(len(suggestedResults)) style_suffix 'description'
-                viewport:
-                    xfill True
-                    ymaximum x52URM.scalePxInt(150)
-                    mousewheel True
-                    draggable True
-                    scrollbars 'vertical'
-                    vbox:
-                        for result in suggestedResults:
-                            button:
-                                xfill True
-                                ysize x52URM.scalePxInt(30)
-                                action Function(x52URM.LabelTree.focus, result['name'])
-                                hbox:
-                                    text result['name'] substitute False
-                                    if result['details']:
-                                        null width x52URM.scalePxInt(10)
-                                        text '({} details)'.format(len(result['details'])) style_suffix 'description'
         hbox:
             spacing x52URM.scalePxInt(4)
             text 'Search in:' yalign .5 style_suffix 'description'
@@ -625,63 +825,105 @@ screen URM_labeltree_content():
             null width x52URM.scalePxInt(8)
             textbutton '{urm_notl}Current{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.centerCurrentNow) hovered x52URM.Tooltip('{urm_notl}Center current label{/urm_notl}') unhovered x52URM.Tooltip()
             textbutton '{urm_notl}Selected{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.centerSelected) hovered x52URM.Tooltip('{urm_notl}Center selected node{/urm_notl}') unhovered x52URM.Tooltip()
-            textbutton '{}%'.format(int(x52URM.LabelTree.zoom * 100)) style_suffix 'icon_button' action Function(x52URM.LabelTree.zoomReset) hovered x52URM.Tooltip('{urm_notl}Reset zoom{/urm_notl}') unhovered x52URM.Tooltip()
+            textbutton x52URM.LabelTree.zoomPercentText() style_suffix 'icon_button' action Function(x52URM.LabelTree.zoomReset) hovered x52URM.Tooltip('{urm_notl}Reset zoom{/urm_notl}') unhovered x52URM.Tooltip()
             textbutton '\ue5d5' style_suffix 'icon_button' action Function(x52URM.LabelTree.refresh) hovered x52URM.Tooltip('{urm_notl}Refresh tree{/urm_notl}') unhovered x52URM.Tooltip()
         null height x52URM.scalePxInt(6)
         frame style_suffix 'seperator' ysize x52URM.scalePxInt(2)
-        viewport:
+        hbox:
             xfill True
             yfill True
-            mousewheel True
-            draggable True
-            scrollbars 'both'
-            xadjustment x52URM.LabelTree.xAdjustment
-            yadjustment x52URM.LabelTree.yAdjustment
-            fixed:
-                xsize x52URM.scalePxInt(x52URM.LabelTree.graphWidth * x52URM.LabelTree.zoom)
-                ysize x52URM.scalePxInt(x52URM.LabelTree.graphHeight * x52URM.LabelTree.zoom)
-                at Transform(zoom=x52URM.LabelTree.zoom)
-                if x52URM.LabelTree.isBuilding():
-                    text 'Building Label Tree... {}%'.format(x52URM.LabelTree.buildProgress()) xalign .5 yalign .5 style_suffix 'description'
-                for edge in visibleEdges:
-                    $ geometry = x52URM.LabelTree.edgeGeometry(edge)
-                    if geometry:
-                        add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['x1']) ypos x52URM.scalePxInt(geometry['y1'] - 1) xsize x52URM.scalePxInt(geometry['midX'] - geometry['x1']) ysize x52URM.scalePxInt(2)
-                        add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['midX'] - 1) ypos x52URM.scalePxInt(min(geometry['y1'], geometry['y2'])) xsize x52URM.scalePxInt(2) ysize x52URM.scalePxInt(abs(geometry['y2'] - geometry['y1']) + 2)
-                        add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['midX']) ypos x52URM.scalePxInt(geometry['y2'] - 1) xsize x52URM.scalePxInt(geometry['x2'] - geometry['midX']) ysize x52URM.scalePxInt(2)
-                        frame xpos x52URM.scalePxInt(geometry['labelX']) ypos x52URM.scalePxInt(geometry['labelY']) xsize x52URM.scalePxInt(geometry['labelWidth']) ysize x52URM.scalePxInt(geometry['labelHeight']) background x52URM.Theme.colors.buttonBg:
-                            text geometry['condition'] size x52URM.scalePxInt(11) xalign .5 yalign .5 substitute False
-                for node in visibleNodes:
-                    if showInternal or not node['internal'] or node['name'] == x52URM.LabelTree.currentLabel():
-                        fixed:
-                            xpos x52URM.scalePxInt(node['x']) ypos x52URM.scalePxInt(node['y'])
-                            xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(node['height'])
-                            button:
-                                xfill True yfill True
-                                background x52URM.Theme.colors.buttonBg
-                                hover_background x52URM.Theme.colors.buttonSecondaryBgHover
-                                hovered x52URM.Tooltip(node['name'])
-                                unhovered x52URM.Tooltip()
-                                action Function(x52URM.LabelTree.nodeClicked, node['name'])
-                                hbox:
-                                    xfill True
-                                    yalign .5
-                                    text node['displayName'] substitute False xmaximum x52URM.scalePxInt(node['width'] - 82) text_align 0.0 yalign .5 size x52URM.scalePxInt(14)
-                                    null width x52URM.scalePxInt(8)
-                                    text node['kind'] style_suffix 'description' xalign 1.0 yalign .5 size x52URM.scalePxInt(10)
-                            if node['name'] == x52URM.LabelTree.currentLabel():
-                                add Solid(x52URM.Theme.colors.buttonSuccessBg) xpos 0 ypos 0 xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
-                            if node['name'] == x52URM.LabelTree.selectedLabel:
-                                add Solid(x52URM.Theme.colors.buttonSecondaryBgHover) xpos 0 ypos x52URM.scalePxInt(5) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
-                            if x52URM.LabelTree.isSearchMatch(node, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal):
-                                add Solid(x52URM.Theme.colors.buttonPrimaryBg) xpos 0 ypos x52URM.scalePxInt(10) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
-                            textbutton If(node['name'] in x52URM.LabelTree.expanded, '\ue5ce', '\ue5cf') style_suffix 'icon_button' xpos x52URM.scalePxInt(node['width'] - 34) ypos 0 action Function(x52URM.LabelTree.toggleExpanded, node['name'])
-                            if node['name'] in x52URM.LabelTree.expanded:
-                                frame ypos x52URM.scalePxInt(node['height'] + 4) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(150) background x52URM.Theme.colors.buttonBg:
-                                    viewport:
-                                        mousewheel True
-                                        draggable True
-                                        scrollbars 'vertical'
-                                        vbox:
-                                            for detail in node['details']:
-                                                text '{}: {}'.format(detail['kind'], detail['text']) size x52URM.scalePxInt(11) substitute False
+            viewport:
+                xfill True
+                yfill True
+                mousewheel True
+                draggable True
+                scrollbars 'both'
+                xadjustment x52URM.LabelTree.xAdjustment
+                yadjustment x52URM.LabelTree.yAdjustment
+                fixed:
+                    xsize x52URM.scalePxInt(x52URM.LabelTree.graphWidth * x52URM.LabelTree.zoom)
+                    ysize x52URM.scalePxInt(x52URM.LabelTree.graphHeight * x52URM.LabelTree.zoom)
+                    at Transform(zoom=x52URM.LabelTree.zoom)
+                    if x52URM.LabelTree.isBuilding():
+                        text 'Building Label Tree... {}%'.format(x52URM.LabelTree.buildProgress()) xalign .5 yalign .5 style_suffix 'description'
+                    for edge in visibleEdges:
+                        $ geometry = x52URM.LabelTree.edgeGeometry(edge)
+                        if geometry:
+                            add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['x1'] - 1) ypos x52URM.scalePxInt(geometry['y1']) xsize x52URM.scalePxInt(2) ysize x52URM.scalePxInt(geometry['sourceLineHeight'])
+                            add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['leftX']) ypos x52URM.scalePxInt(geometry['midY'] - 1) xsize x52URM.scalePxInt(geometry['horizontalWidth']) ysize x52URM.scalePxInt(2)
+                            add Solid(x52URM.Theme.colors.buttonSecondaryBg) xpos x52URM.scalePxInt(geometry['x2'] - 1) ypos x52URM.scalePxInt(geometry['midY']) xsize x52URM.scalePxInt(2) ysize x52URM.scalePxInt(geometry['targetLineHeight'])
+                            frame xpos x52URM.scalePxInt(geometry['labelX']) ypos x52URM.scalePxInt(geometry['labelY']) xsize x52URM.scalePxInt(geometry['labelWidth']) ysize x52URM.scalePxInt(geometry['labelHeight']) background x52URM.Theme.colors.buttonBg:
+                                text geometry['condition'] size x52URM.scalePxInt(11) xalign .5 yalign .5 substitute False
+                    for node in visibleNodes:
+                        if showInternal or not node['internal'] or node['name'] == x52URM.LabelTree.currentLabel():
+                            fixed:
+                                xpos x52URM.scalePxInt(node['x']) ypos x52URM.scalePxInt(node['y'])
+                                xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(node['height'])
+                                button:
+                                    xfill True yfill True
+                                    background x52URM.Theme.colors.buttonBg
+                                    hover_background x52URM.Theme.colors.buttonSecondaryBgHover
+                                    hovered x52URM.Tooltip(node['name'])
+                                    unhovered x52URM.Tooltip()
+                                    action Function(x52URM.LabelTree.nodeClicked, node['name'])
+                                    hbox:
+                                        xfill True
+                                        yalign .5
+                                        text node['displayName'] substitute False xmaximum x52URM.scalePxInt(node['width'] - 82) text_align 0.0 yalign .5 size x52URM.scalePxInt(14)
+                                        null width x52URM.scalePxInt(8)
+                                        text node['kind'] style_suffix 'description' xalign 1.0 yalign .5 size x52URM.scalePxInt(10)
+                                if node['name'] == x52URM.LabelTree.currentLabel():
+                                    add Solid(x52URM.Theme.colors.buttonSuccessBg) xpos 0 ypos 0 xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
+                                if node['name'] == x52URM.LabelTree.selectedLabel:
+                                    add Solid(x52URM.Theme.colors.buttonSecondaryBgHover) xpos 0 ypos x52URM.scalePxInt(5) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
+                                if x52URM.LabelTree.isSearchMatch(node, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal):
+                                    add Solid(x52URM.Theme.colors.buttonPrimaryBg) xpos 0 ypos x52URM.scalePxInt(10) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
+                                textbutton If(node['name'] in x52URM.LabelTree.expanded, '\ue5ce', '\ue5cf') style_suffix 'icon_button' xpos x52URM.scalePxInt(node['width'] - 34) ypos 0 action Function(x52URM.LabelTree.toggleExpanded, node['name'])
+                                if node['name'] in x52URM.LabelTree.expanded:
+                                    frame ypos x52URM.scalePxInt(node['height'] + 4) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(150) background x52URM.Theme.colors.buttonBg:
+                                        viewport:
+                                            mousewheel True
+                                            draggable True
+                                            scrollbars 'vertical'
+                                            vbox:
+                                                for detail in node['details']:
+                                                    text '{}: {}'.format(detail['kind'], detail['text']) size x52URM.scalePxInt(11) substitute False
+            if queryText and resultsPaneOpen:
+                frame:
+                    xsize x52URM.scalePxInt(360)
+                    yfill True
+                    background x52URM.Theme.colors.buttonBg
+                    vbox:
+                        xfill True
+                        yfill True
+                        hbox:
+                            xfill True
+                            text 'Matches: {}'.format(searchMatchCount) style_suffix 'description' yalign .5
+                            null width x52URM.scalePxInt(8)
+                            textbutton '{urm_notl}Previous{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.navigateSearch, queryText, -1, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
+                            textbutton '{urm_notl}Next{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.navigateSearch, queryText, 1, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
+                            textbutton '\ue5c9' style_suffix 'icon_button' action SetLocalVariable('resultsPaneOpen', False) hovered x52URM.Tooltip('{urm_notl}Collapse results pane{/urm_notl}') unhovered x52URM.Tooltip()
+                        viewport:
+                            xfill True
+                            yfill True
+                            mousewheel True
+                            draggable True
+                            scrollbars 'vertical'
+                            vbox:
+                                for result in allSearchResults:
+                                    button:
+                                        xfill True
+                                        ysize x52URM.scalePxInt(30)
+                                        action Function(x52URM.LabelTree.focus, result['name'])
+                                        selected result['name'] == x52URM.LabelTree.selectedLabel
+                                        hbox:
+                                            text result['name'] substitute False
+                                            if result['details']:
+                                                null width x52URM.scalePxInt(10)
+                                                text '({} details)'.format(len(result['details'])) style_suffix 'description'
+            elif queryText:
+                frame:
+                    xsize x52URM.scalePxInt(38)
+                    yfill True
+                    background x52URM.Theme.colors.buttonBg
+                    textbutton '\ue5c9' style_suffix 'icon_button' action SetLocalVariable('resultsPaneOpen', True) hovered x52URM.Tooltip('{urm_notl}Expand results pane{/urm_notl}') unhovered x52URM.Tooltip()
