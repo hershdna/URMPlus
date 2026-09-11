@@ -35,8 +35,8 @@ archives.
 
 ## Compatibility
 
-The current release is tested against Another Chance v1.66's bundled
-Ren'Py 7.4.4.1439 runtime (Python 2.7). The implementation intentionally
+The current release is tested against a Ren'Py 7.4.4.1439 runtime (Python 2.7). 
+The implementation intentionally
 avoids Python 3-only syntax, variadic `min`/`max` calls, eager full-tree screen
 construction, and assumptions about a game's own global variables.
 
