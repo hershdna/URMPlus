@@ -43,8 +43,12 @@ init -2 python in x52URM:
             self._buildProgress = 0
             self._nodeColumns = {}
             self._edgesByNode = {}
+            self._statementLabels = {}
+            self._knownLabelNames = set()
             self._focusSignature = None
             self._pendingCenter = None
+            self._currentCacheKey = None
+            self._currentCacheValue = None
             self._searchCacheKey = None
             self._searchCacheResults = []
             self._searchAllResults = []
@@ -182,6 +186,15 @@ init -2 python in x52URM:
             if not statements or depth > 80:
                 return
             for node in statements:
+                statementName = getattr(node, 'name', None)
+                if statementName:
+                    try:
+                        mappedLabel = sourceLabel
+                        if isinstance(statementName, basestring) and statementName in self._knownLabelNames:
+                            mappedLabel = statementName
+                        self._statementLabels[statementName] = mappedLabel
+                    except:
+                        pass
                 nodeType = self._nodeType(node)
                 if nodeType == 'If':
                     entries = getattr(node, 'entries', []) or []
@@ -246,6 +259,7 @@ init -2 python in x52URM:
             self._building = True
             self._ready = False
             self._buildNames = names
+            self._knownLabelNames = set(names)
             self._buildIndex = 0
             self._buildNodes = []
             self._buildEdges = []
@@ -253,8 +267,11 @@ init -2 python in x52URM:
             self._buildProgress = 0
             self._nodeColumns = {}
             self._edgesByNode = {}
+            self._statementLabels = {}
             self._focusSignature = None
             self._pendingCenter = None
+            self._currentCacheKey = None
+            self._currentCacheValue = None
             self._searchCacheKey = None
             self._searchCacheResults = []
             self._searchAllResults = []
@@ -275,6 +292,7 @@ init -2 python in x52URM:
                 edges = []
                 try:
                     label = renpy.game.script.lookup(name)
+                    self._statementLabels[name] = name
                     self._scan(getattr(label, 'block', None), name, [], details, edges)
                 except:
                     pass
@@ -440,7 +458,7 @@ init -2 python in x52URM:
             self._nodeColumns = groups
             self._focusSignature = None
 
-        def _focusedNames(self, query='', labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
+        def _focusedNames(self, query='', labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False, showSearched=True, showCurrent=True):
             """Return only the active label paths plus their immediate branches.
 
             The complete graph remains cached in self.nodes/self.edges. The
@@ -451,20 +469,17 @@ init -2 python in x52URM:
             """
             anchors = []
             results = self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal) if query else []
-            resultNames = set([node['name'] for node in results])
             selected = self.selectedLabel if self.selectedLabel in self.byName else None
             current = self.currentLabel()
-            if selected:
-                anchors.append(selected)
-            elif current in self.byName and current != 'after_load':
-                anchors.append(current)
-            elif query and results:
-                anchors.append(results[0]['name'])
-            if not anchors:
-                if self.nodes:
-                    anchors.append(self.nodes[0]['name'])
+            if showSearched and query and results:
+                if selected:
+                    anchors.append(selected)
                 else:
-                    return set()
+                    anchors.append(results[0]['name'])
+            if showCurrent and current in self.byName and current != 'after_load' and current not in anchors:
+                anchors.append(current)
+            if not anchors:
+                return set()
 
             focused = set(anchors)
             pending = list(anchors)
@@ -572,23 +587,55 @@ init -2 python in x52URM:
             return edge['source'] in path and edge['target'] in path
 
         def currentLabel(self):
-            # LabelMon is the mod's normal callback-based source of truth.
-            # Ignore Ren'Py's load hook, which can otherwise remain visible
-            # while the real script location is already available.
+            # Ren'Py's context points at the active statement, not necessarily
+            # at a label. The build records each statement's containing label,
+            # so this remains accurate while dialogue is running.
+            currentStatement = None
+            callbackLabel = None
             try:
-                current = LabelMon.lastLabel
-                if current in self.byName and current != 'after_load':
-                    return current
+                currentStatement = getattr(renpy.context(), 'current', None)
             except:
                 pass
-            # Ren'Py keeps the active statement in the current context. This
-            # fallback also works for games whose label callback was replaced.
             try:
-                current = getattr(renpy.context(), 'current', None)
-                if current in self.byName and current != 'after_load':
-                    return current
+                callbackLabel = LabelMon.lastLabel
             except:
                 pass
+            try:
+                logLength = len(getattr(renpy.game.log, 'log', []) or [])
+            except:
+                logLength = 0
+            cacheKey = (currentStatement, callbackLabel, logLength, self._ready)
+            if cacheKey == self._currentCacheKey:
+                return self._currentCacheValue
+            candidates = [currentStatement]
+            try:
+                rollbackLog = getattr(renpy.game.log, 'log', []) or []
+                inspected = 0
+                for rollback in reversed(rollbackLog):
+                    rollbackContext = getattr(rollback, 'context', None)
+                    if rollbackContext is not None:
+                        candidates.append(getattr(rollbackContext, 'current', None))
+                    inspected += 1
+                    if inspected >= 64:
+                        break
+            except:
+                pass
+            # LabelMon is the original mod's callback-based fallback. Ignore
+            # Ren'Py's menu/load helper labels, which are not game locations.
+            candidates.append(callbackLabel)
+            helperLabels = set(['after_load', 'before_load', '_after_load',
+                                'save_screen', 'load_screen', '_save_screen',
+                                '_load_screen', '_noisy_return'])
+            for candidate in candidates:
+                if candidate in helperLabels:
+                    continue
+                mapped = self._statementLabels.get(candidate, candidate)
+                if mapped in self.byName and mapped not in helperLabels:
+                    self._currentCacheKey = cacheKey
+                    self._currentCacheValue = mapped
+                    return mapped
+            self._currentCacheKey = cacheKey
+            self._currentCacheValue = None
             return None
 
         def highlightedLabel(self):
@@ -756,10 +803,10 @@ init -2 python in x52URM:
             filters = {'labels': labels, 'variables': variables, 'conditions': conditions, 'links': links, 'statements': statements}
             return self._matches(node, query, filters, showInternal)
 
-        def visibleNodes(self, showInternal=False, query='', labels=True, variables=True, conditions=True, links=True, statements=True):
+        def visibleNodes(self, showInternal=False, query='', labels=True, variables=True, conditions=True, links=True, statements=True, showSearched=True, showCurrent=True):
             if not self._ready:
                 return []
-            focusedNames = self._focusedNames(query, labels, variables, conditions, links, statements, showInternal)
+            focusedNames = self._focusedNames(query, labels, variables, conditions, links, statements, showInternal, showSearched, showCurrent)
             self._layoutFocus(focusedNames)
             self._applyPendingCenter()
             try:
@@ -847,6 +894,9 @@ screen URM_labeltree_content():
     default queryText = ''
     default allSearchResults = []
     default resultsPaneOpen = True
+    default viewFilterOpen = False
+    default showSearchedBranches = True
+    default showCurrentBranch = True
 
     python:
         x52URM.LabelTree.ensureBuilt(8)
@@ -856,9 +906,13 @@ screen URM_labeltree_content():
         queryText = str(searchInput.get_text())
         allSearchResults = x52URM.LabelTree.searchResultsAll(queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
         searchMatchCount = len(allSearchResults)
-        resultsPaneWidth = x52URM.scalePxInt(360)
-        graphViewportMaximum = x52URM.LabelTree._max2(x52URM.scalePxInt(320), x52URM.scalePxInt(renpy.config.screen_width) - resultsPaneWidth) if queryText and resultsPaneOpen else x52URM.scalePxInt(renpy.config.screen_width)
-        visibleNodes = x52URM.LabelTree.visibleNodes(showInternal, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements)
+        resultsPaneWidth = x52URM.scalePxInt(320)
+        # The Label Tree is inside the main screen's 100px tab rail. Reserve
+        # that rail before sizing the graph, otherwise the results pane is
+        # placed beyond the right edge on scaled displays.
+        treeContentWidth = x52URM.scalePxInt(renpy.config.screen_width - 100)
+        graphViewportMaximum = x52URM.LabelTree._max2(x52URM.scalePxInt(320), treeContentWidth - resultsPaneWidth) if queryText and resultsPaneOpen else treeContentWidth
+        visibleNodes = x52URM.LabelTree.visibleNodes(showInternal, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showSearchedBranches, showCurrentBranch)
         visibleEdges = x52URM.LabelTree.visibleEdges(visibleNodes)
 
     key 'mousedown_4' action Function(x52URM.LabelTree.zoomIn)
@@ -900,67 +954,88 @@ screen URM_labeltree_content():
         hbox:
             xfill True
             yfill True
-            viewport:
-                xfill True
-                xminimum x52URM.scalePxInt(1)
+            fixed:
+                xsize graphViewportMaximum
+                xminimum graphViewportMaximum
                 xmaximum graphViewportMaximum
                 yfill True
-                mousewheel True
-                draggable True
-                scrollbars 'both'
-                xadjustment x52URM.LabelTree.xAdjustment
-                yadjustment x52URM.LabelTree.yAdjustment
-                fixed:
-                    xsize x52URM.scalePxInt(x52URM.LabelTree.graphWidth * x52URM.LabelTree.zoom)
-                    ysize x52URM.scalePxInt(x52URM.LabelTree.graphHeight * x52URM.LabelTree.zoom)
-                    at Transform(zoom=x52URM.LabelTree.zoom)
-                    if x52URM.LabelTree.isBuilding():
-                        text 'Building Label Tree... {}%'.format(x52URM.LabelTree.buildProgress()) xalign .5 yalign .5 style_suffix 'description'
-                    for edge in visibleEdges:
-                        $ geometry = x52URM.LabelTree.edgeGeometry(edge)
-                        if geometry:
-                            $ pathEdge = x52URM.LabelTree.isSelectedPathEdge(edge)
-                            $ edgeColor = x52URM.Theme.colors.buttonPrimaryBg if pathEdge else x52URM.Theme.colors.buttonSecondaryBg
-                            $ lineWidth = 6 if pathEdge else 4
-                            add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['x1'] - lineWidth / 2) ypos x52URM.scalePxInt(geometry['y1']) xsize x52URM.scalePxInt(lineWidth) ysize x52URM.scalePxInt(geometry['sourceLineHeight'])
-                            add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['leftX']) ypos x52URM.scalePxInt(geometry['midY'] - lineWidth / 2) xsize x52URM.scalePxInt(geometry['horizontalWidth']) ysize x52URM.scalePxInt(lineWidth)
-                            add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['x2'] - lineWidth / 2) ypos x52URM.scalePxInt(geometry['midY']) xsize x52URM.scalePxInt(lineWidth) ysize x52URM.scalePxInt(geometry['targetLineHeight'])
-                            frame xpos x52URM.scalePxInt(geometry['labelX']) ypos x52URM.scalePxInt(geometry['labelY']) xsize x52URM.scalePxInt(geometry['labelWidth']) ysize x52URM.scalePxInt(geometry['labelHeight']) background edgeColor:
-                                text geometry['condition'] size x52URM.scalePxInt(11) xalign .5 yalign .5 substitute False
-                    for node in visibleNodes:
-                        if showInternal or not node['internal'] or node['name'] == x52URM.LabelTree.currentLabel():
-                            fixed:
-                                xpos x52URM.scalePxInt(node['x']) ypos x52URM.scalePxInt(node['y'])
-                                xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(node['height'])
-                                button:
-                                    xfill True yfill True
-                                    background x52URM.Theme.colors.buttonBg
-                                    hover_background x52URM.Theme.colors.buttonSecondaryBgHover
-                                    hovered x52URM.Tooltip(node['name'])
-                                    unhovered x52URM.Tooltip()
-                                    action Function(x52URM.LabelTree.nodeClicked, node['name'])
-                                    hbox:
-                                        xfill True
-                                        yalign .5
-                                        text node['displayName'] substitute False xmaximum x52URM.scalePxInt(node['width'] - 82) text_align 0.0 yalign .5 size x52URM.scalePxInt(14)
-                                        null width x52URM.scalePxInt(8)
-                                        text node['kind'] style_suffix 'description' xalign 1.0 yalign .5 size x52URM.scalePxInt(10)
-                                if node['name'] == x52URM.LabelTree.currentLabel():
-                                    add Solid(x52URM.Theme.colors.buttonSuccessBg) xpos 0 ypos 0 xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
-                                if node['name'] == x52URM.LabelTree.selectedLabel:
-                                    add Solid(x52URM.Theme.colors.buttonSecondaryBgHover) xpos 0 ypos x52URM.scalePxInt(5) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
-                                if x52URM.LabelTree.isSearchMatch(node, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal):
-                                    add Solid(x52URM.Theme.colors.buttonPrimaryBg) xpos 0 ypos x52URM.scalePxInt(10) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
-                                textbutton If(node['name'] in x52URM.LabelTree.expanded, '\ue5ce', '\ue5cf') style_suffix 'icon_button' xpos x52URM.scalePxInt(node['width'] - 34) ypos 0 action Function(x52URM.LabelTree.toggleExpanded, node['name'])
-                                if node['name'] in x52URM.LabelTree.expanded:
-                                    frame ypos x52URM.scalePxInt(node['height'] + 4) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(150) background x52URM.Theme.colors.buttonBg:
-                                        viewport:
-                                            mousewheel True
-                                            draggable True
-                                            scrollbars 'vertical'
-                                            vbox:
-                                                for detail in node['details']:
-                                                    text '{}: {}'.format(detail['kind'], detail['text']) size x52URM.scalePxInt(11) substitute False
+                viewport:
+                    xfill True
+                    xminimum x52URM.scalePxInt(1)
+                    xmaximum graphViewportMaximum
+                    yfill True
+                    mousewheel True
+                    draggable True
+                    scrollbars 'both'
+                    xadjustment x52URM.LabelTree.xAdjustment
+                    yadjustment x52URM.LabelTree.yAdjustment
+                    fixed:
+                        xsize x52URM.scalePxInt(x52URM.LabelTree.graphWidth * x52URM.LabelTree.zoom)
+                        ysize x52URM.scalePxInt(x52URM.LabelTree.graphHeight * x52URM.LabelTree.zoom)
+                        at Transform(zoom=x52URM.LabelTree.zoom)
+                        if x52URM.LabelTree.isBuilding():
+                            text 'Building Label Tree... {}%'.format(x52URM.LabelTree.buildProgress()) xalign .5 yalign .5 style_suffix 'description'
+                        elif not visibleNodes:
+                            text 'Enable a view-filter branch or select a search result.' xalign .5 yalign .5 style_suffix 'description'
+                        for edge in visibleEdges:
+                            $ geometry = x52URM.LabelTree.edgeGeometry(edge)
+                            if geometry:
+                                $ pathEdge = x52URM.LabelTree.isSelectedPathEdge(edge)
+                                $ edgeColor = x52URM.Theme.colors.buttonPrimaryBg if pathEdge else x52URM.Theme.colors.buttonSecondaryBg
+                                $ lineWidth = 6 if pathEdge else 4
+                                add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['x1'] - lineWidth / 2) ypos x52URM.scalePxInt(geometry['y1']) xsize x52URM.scalePxInt(lineWidth) ysize x52URM.scalePxInt(geometry['sourceLineHeight'])
+                                add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['leftX']) ypos x52URM.scalePxInt(geometry['midY'] - lineWidth / 2) xsize x52URM.scalePxInt(geometry['horizontalWidth']) ysize x52URM.scalePxInt(lineWidth)
+                                add Solid(edgeColor) xpos x52URM.scalePxInt(geometry['x2'] - lineWidth / 2) ypos x52URM.scalePxInt(geometry['midY']) xsize x52URM.scalePxInt(lineWidth) ysize x52URM.scalePxInt(geometry['targetLineHeight'])
+                                frame xpos x52URM.scalePxInt(geometry['labelX']) ypos x52URM.scalePxInt(geometry['labelY']) xsize x52URM.scalePxInt(geometry['labelWidth']) ysize x52URM.scalePxInt(geometry['labelHeight']) background edgeColor:
+                                    text geometry['condition'] size x52URM.scalePxInt(11) xalign .5 yalign .5 substitute False
+                        for node in visibleNodes:
+                            if showInternal or not node['internal'] or node['name'] == x52URM.LabelTree.currentLabel():
+                                fixed:
+                                    xpos x52URM.scalePxInt(node['x']) ypos x52URM.scalePxInt(node['y'])
+                                    xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(node['height'])
+                                    button:
+                                        xfill True yfill True
+                                        background x52URM.Theme.colors.buttonBg
+                                        hover_background x52URM.Theme.colors.buttonSecondaryBgHover
+                                        hovered x52URM.Tooltip(node['name'])
+                                        unhovered x52URM.Tooltip()
+                                        action Function(x52URM.LabelTree.nodeClicked, node['name'])
+                                        hbox:
+                                            xfill True
+                                            yalign .5
+                                            text node['displayName'] substitute False xmaximum x52URM.scalePxInt(node['width'] - 82) text_align 0.0 yalign .5 size x52URM.scalePxInt(14)
+                                            null width x52URM.scalePxInt(8)
+                                            text node['kind'] style_suffix 'description' xalign 1.0 yalign .5 size x52URM.scalePxInt(10)
+                                    if node['name'] == x52URM.LabelTree.currentLabel():
+                                        add Solid(x52URM.Theme.colors.buttonSuccessBg) xpos 0 ypos 0 xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
+                                    if node['name'] == x52URM.LabelTree.selectedLabel:
+                                        add Solid(x52URM.Theme.colors.buttonSecondaryBgHover) xpos 0 ypos x52URM.scalePxInt(5) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
+                                    if x52URM.LabelTree.isSearchMatch(node, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal):
+                                        add Solid(x52URM.Theme.colors.buttonPrimaryBg) xpos 0 ypos x52URM.scalePxInt(10) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(5)
+                                    textbutton If(node['name'] in x52URM.LabelTree.expanded, '\ue5ce', '\ue5cf') style_suffix 'icon_button' xpos x52URM.scalePxInt(node['width'] - 34) ypos 0 action Function(x52URM.LabelTree.toggleExpanded, node['name'])
+                                    if node['name'] in x52URM.LabelTree.expanded:
+                                        frame ypos x52URM.scalePxInt(node['height'] + 4) xsize x52URM.scalePxInt(node['width']) ysize x52URM.scalePxInt(150) background x52URM.Theme.colors.buttonBg:
+                                            viewport:
+                                                mousewheel True
+                                                draggable True
+                                                scrollbars 'vertical'
+                                                vbox:
+                                                    for detail in node['details']:
+                                                        text '{}: {}'.format(detail['kind'], detail['text']) size x52URM.scalePxInt(11) substitute False
+                vbox:
+                    xalign 1.0
+                    yalign 0.0
+                    spacing x52URM.scalePxInt(4)
+                    textbutton '{urm_notl}View Filter{/urm_notl}' style_suffix 'buttonSecondary' action SetLocalVariable('viewFilterOpen', not viewFilterOpen)
+                    if viewFilterOpen:
+                        frame:
+                            xsize x52URM.scalePxInt(250)
+                            background x52URM.Theme.colors.buttonBg
+                            vbox:
+                                xfill True
+                                text '{urm_notl}Show branches{/urm_notl}' style_suffix 'description'
+                                use x52URM_checkbox(showSearchedBranches, '{urm_notl}Searched branches{/urm_notl}', SetLocalVariable('showSearchedBranches', not showSearchedBranches))
+                                use x52URM_checkbox(showCurrentBranch, '{urm_notl}Current branch{/urm_notl}', SetLocalVariable('showCurrentBranch', not showCurrentBranch))
             if queryText and resultsPaneOpen:
                 frame:
                     xsize resultsPaneWidth
@@ -986,13 +1061,13 @@ screen URM_labeltree_content():
                                 for result in allSearchResults:
                                     button:
                                         xfill True
-                                        ysize x52URM.scalePxInt(70)
+                                        ysize x52URM.scalePxInt(86)
                                         action Function(x52URM.LabelTree.focus, result['name'])
                                         selected result['name'] == x52URM.LabelTree.selectedLabel
                                         vbox:
                                             xfill True
                                             yalign .5
-                                            text x52URM.LabelTree.previewName(result['name']) substitute False xmaximum x52URM.scalePxInt(300) text_align 0.0 size x52URM.scalePxInt(13)
+                                            text x52URM.LabelTree.previewName(result['name']) substitute False xmaximum x52URM.scalePxInt(260) text_align 0.0 size x52URM.scalePxInt(13)
                                             if result['details']:
                                                 text '({} details)'.format(len(result['details'])) style_suffix 'description'
             elif queryText:
