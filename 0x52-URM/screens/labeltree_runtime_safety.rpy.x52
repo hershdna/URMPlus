@@ -1,0 +1,10 @@
+# Guard opaque Ren'Py statement names used by get_return_stack().
+
+init 1 python in x52URM:
+    def _lt_safe_resolve_statement(self, candidate):
+        try:
+            return _lt_resolve_statement(self, candidate)
+        except:
+            return None
+
+    LabelTreeClass._lt_resolve_statement = _lt_safe_resolve_statement
