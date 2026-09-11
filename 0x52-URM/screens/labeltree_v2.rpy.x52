@@ -140,6 +140,26 @@ init -2 python in x52URM:
                 lines[-1] = lines[-1][:-3] + '...'
             return '\n'.join(lines)
 
+        def _wrapFullLabel(self, name, width=28):
+            """Wrap a label for the results pane without throwing away text."""
+            name = self._safeText(name)
+            if len(name) <= width:
+                return name
+            lines = []
+            start = 0
+            while start < len(name):
+                end = self._min2(len(name), start + width)
+                if end < len(name):
+                    split = name.rfind('_', start + 1, end)
+                    if split > start + (width // 2):
+                        end = split + 1
+                lines.append(name[start:end].rstrip('_'))
+                start = end
+            return '\n'.join(lines)
+
+        def previewName(self, name):
+            return self._wrapFullLabel(name)
+
         def _nodeWidth(self, name):
             # Reserve room for the type badge and expand control. Wider cards
             # keep long labels readable while the cap prevents a single label
@@ -361,7 +381,10 @@ init -2 python in x52URM:
             maxLevelWidth = 1400
             levelRows = {}
             levelHeights = {}
-            graphWidth = 1000
+            # Keep a small navigation margin even when the focused path is
+            # shorter than the window. This gives Ren'Py's viewport a real
+            # scrollable child while keeping the focused nodes centered.
+            graphWidth = self._max2(1000, renpy.config.screen_width)
             for level, group in groups.items():
                 group.sort(key=lambda node: node['name'].lower())
                 rows = []
@@ -413,7 +436,7 @@ init -2 python in x52URM:
                 currentY += levelHeights[level] + levelGap
             self._layoutRowHeight = nodeHeight + siblingRowGap
             self.graphWidth = graphWidth
-            self.graphHeight = self._max2(540, currentY - levelGap + 30)
+            self.graphHeight = self._max2(self._max2(540, currentY - levelGap + 30), renpy.config.screen_height)
             self._nodeColumns = groups
             self._focusSignature = None
 
@@ -431,17 +454,12 @@ init -2 python in x52URM:
             resultNames = set([node['name'] for node in results])
             selected = self.selectedLabel if self.selectedLabel in self.byName else None
             current = self.currentLabel()
-            if query and results:
-                if selected in resultNames:
-                    anchors.append(selected)
-                else:
-                    anchors.append(results[0]['name'])
-            elif selected:
+            if selected:
                 anchors.append(selected)
-            elif current in self.byName:
+            elif current in self.byName and current != 'after_load':
                 anchors.append(current)
-            if current in self.byName and current not in anchors:
-                anchors.append(current)
+            elif query and results:
+                anchors.append(results[0]['name'])
             if not anchors:
                 if self.nodes:
                     anchors.append(self.nodes[0]['name'])
@@ -474,8 +492,8 @@ init -2 python in x52URM:
                 return
             self._focusSignature = signature
             if not focusedNames:
-                self.graphWidth = 1000
-                self.graphHeight = 540
+                self.graphWidth = self._max2(1000, renpy.config.screen_width)
+                self.graphHeight = self._max2(540, renpy.config.screen_height)
                 return
             groups = {}
             for name in focusedNames:
@@ -487,7 +505,7 @@ init -2 python in x52URM:
             siblingRowGap = 42
             nodeHeight = 86
             maxLevelWidth = 960
-            graphWidth = 1000
+            graphWidth = self._max2(1000, renpy.config.screen_width)
             currentY = 30
             for level in sorted(groups.keys()):
                 group = groups[level]
@@ -524,7 +542,7 @@ init -2 python in x52URM:
                 graphWidth = self._max2(graphWidth, self._min2(maxLevelWidth + 60, 1080))
                 currentY += len(rows) * nodeHeight + self._max2(0, len(rows) - 1) * siblingRowGap + levelGap
             self.graphWidth = graphWidth
-            self.graphHeight = self._max2(540, currentY - levelGap + 30)
+            self.graphHeight = self._max2(self._max2(540, currentY - levelGap + 30), renpy.config.screen_height)
 
         def _applyPendingCenter(self):
             if self._pendingCenter in self.byName:
@@ -554,10 +572,24 @@ init -2 python in x52URM:
             return edge['source'] in path and edge['target'] in path
 
         def currentLabel(self):
+            # LabelMon is the mod's normal callback-based source of truth.
+            # Ignore Ren'Py's load hook, which can otherwise remain visible
+            # while the real script location is already available.
             try:
-                return LabelMon.lastLabel
+                current = LabelMon.lastLabel
+                if current in self.byName and current != 'after_load':
+                    return current
             except:
-                return None
+                pass
+            # Ren'Py keeps the active statement in the current context. This
+            # fallback also works for games whose label callback was replaced.
+            try:
+                current = getattr(renpy.context(), 'current', None)
+                if current in self.byName and current != 'after_load':
+                    return current
+            except:
+                pass
+            return None
 
         def highlightedLabel(self):
             current = self.currentLabel()
@@ -638,6 +670,8 @@ init -2 python in x52URM:
 
         def clearFocus(self):
             self.selectedLabel = None
+            self._lastCenteredCurrent = None
+            self._pendingCenter = self.currentLabel()
             renpy.restart_interaction()
 
         def _makeSearchFields(self, node):
@@ -817,9 +851,13 @@ screen URM_labeltree_content():
     python:
         x52URM.LabelTree.ensureBuilt(8)
         x52URM.LabelTree.centerCurrent()
-        queryText = str(searchInput)
+        # InputValue is the Ren'Py contract for screen input. Read through
+        # get_text() instead of relying on implementation-specific attributes.
+        queryText = str(searchInput.get_text())
         allSearchResults = x52URM.LabelTree.searchResultsAll(queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
         searchMatchCount = len(allSearchResults)
+        resultsPaneWidth = x52URM.scalePxInt(360)
+        graphViewportMaximum = x52URM.LabelTree._max2(x52URM.scalePxInt(320), x52URM.scalePxInt(renpy.config.screen_width) - resultsPaneWidth) if queryText and resultsPaneOpen else x52URM.scalePxInt(renpy.config.screen_width)
         visibleNodes = x52URM.LabelTree.visibleNodes(showInternal, queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements)
         visibleEdges = x52URM.LabelTree.visibleEdges(visibleNodes)
 
@@ -864,6 +902,8 @@ screen URM_labeltree_content():
             yfill True
             viewport:
                 xfill True
+                xminimum x52URM.scalePxInt(1)
+                xmaximum graphViewportMaximum
                 yfill True
                 mousewheel True
                 draggable True
@@ -923,7 +963,7 @@ screen URM_labeltree_content():
                                                     text '{}: {}'.format(detail['kind'], detail['text']) size x52URM.scalePxInt(11) substitute False
             if queryText and resultsPaneOpen:
                 frame:
-                    xsize x52URM.scalePxInt(360)
+                    xsize resultsPaneWidth
                     yfill True
                     background x52URM.Theme.colors.buttonBg
                     vbox:
@@ -946,13 +986,14 @@ screen URM_labeltree_content():
                                 for result in allSearchResults:
                                     button:
                                         xfill True
-                                        ysize x52URM.scalePxInt(30)
+                                        ysize x52URM.scalePxInt(70)
                                         action Function(x52URM.LabelTree.focus, result['name'])
                                         selected result['name'] == x52URM.LabelTree.selectedLabel
-                                        hbox:
-                                            text result['name'] substitute False
+                                        vbox:
+                                            xfill True
+                                            yalign .5
+                                            text x52URM.LabelTree.previewName(result['name']) substitute False xmaximum x52URM.scalePxInt(300) text_align 0.0 size x52URM.scalePxInt(13)
                                             if result['details']:
-                                                null width x52URM.scalePxInt(10)
                                                 text '({} details)'.format(len(result['details'])) style_suffix 'description'
             elif queryText:
                 frame:
