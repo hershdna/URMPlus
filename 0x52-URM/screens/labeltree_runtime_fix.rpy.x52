@@ -1,0 +1,245 @@
+# Label Tree runtime/current-flow compatibility layer.
+# Loaded after labeltree_v2 so it can extend the existing implementation without
+# replacing URM's original label callback or relying on Python 3 features.
+
+init -1 python in x52URM:
+    def _lt_runtime_callback(self, label, called):
+        if not label:
+            return
+        try:
+            if label.startswith('_') or label == 'after_load':
+                return
+        except:
+            return
+        self._runtimeLabel = label
+        self._runtimeLabelSerial = getattr(self, '_runtimeLabelSerial', 0) + 1
+        self._currentCacheKey = None
+
+    def _lt_resolve_statement(self, candidate):
+        if candidate is None:
+            return None
+        helperLabels = set(['after_load', 'before_load', '_after_load',
+                            'save_screen', 'load_screen', '_save_screen',
+                            '_load_screen', '_noisy_return'])
+        if candidate in helperLabels:
+            return None
+        mapped = self._statementLabels.get(candidate, None)
+        if mapped is None:
+            try:
+                statementNode = renpy.game.script.lookup(candidate)
+                mapped = self._statementObjectLabels.get(id(statementNode), None)
+                if mapped is None and self._nodeType(statementNode) == 'Label':
+                    mapped = getattr(statementNode, 'name', None)
+            except:
+                mapped = None
+        if mapped is None and isinstance(candidate, basestring):
+            mapped = candidate
+        if mapped in self.byName and mapped not in helperLabels:
+            return mapped
+        return None
+
+    def _lt_return_stack_labels(self):
+        result = []
+        try:
+            stack = renpy.get_return_stack()
+        except:
+            stack = []
+        for candidate in stack:
+            mapped = self._lt_resolve_statement(candidate)
+            if mapped and mapped not in result:
+                result.append(mapped)
+        return result
+
+    def _lt_current_label(self):
+        currentStatement = None
+        callbackLabel = None
+        runtimeLabel = getattr(self, '_runtimeLabel', None)
+        try:
+            # Ren'Py 7.4 exposes the executing statement on the live Context.
+            currentStatement = getattr(renpy.game.context(), 'current', None)
+        except:
+            pass
+        try:
+            callbackLabel = LabelMon.lastLabel
+        except:
+            pass
+        try:
+            logLength = len(getattr(renpy.game.log, 'log', []) or [])
+        except:
+            logLength = 0
+        serial = getattr(self, '_runtimeLabelSerial', 0)
+        cacheKey = (currentStatement, runtimeLabel, callbackLabel, serial,
+                    logLength, self._ready, len(self.byName))
+        if cacheKey == self._currentCacheKey:
+            return self._currentCacheValue
+        candidates = [runtimeLabel, currentStatement]
+        try:
+            rollbackLog = getattr(renpy.game.log, 'log', []) or []
+            inspected = 0
+            for rollback in reversed(rollbackLog):
+                rollbackContext = getattr(rollback, 'context', None)
+                if rollbackContext is not None:
+                    candidates.append(getattr(rollbackContext, 'current', None))
+                inspected += 1
+                if inspected >= 64:
+                    break
+        except:
+            pass
+        candidates.append(callbackLabel)
+        for candidate in candidates:
+            mapped = self._lt_resolve_statement(candidate)
+            if mapped:
+                self._currentCacheKey = cacheKey
+                self._currentCacheValue = mapped
+                return mapped
+        self._currentCacheKey = cacheKey
+        self._currentCacheValue = None
+        return None
+
+    def _lt_reindex_partial(self):
+        self.nodes = list(self._buildNodes)
+        self.byName = dict(self._buildByName)
+        uniqueEdges = []
+        seenEdges = set()
+        for edge in self._buildEdges:
+            key = (edge['source'], edge['target'], edge['condition'], edge['kind'])
+            if key not in seenEdges:
+                seenEdges.add(key)
+                uniqueEdges.append(edge)
+        self.edges = uniqueEdges
+        self._edgesByNode = {}
+        for edge in self.edges:
+            self._edgesByNode.setdefault(edge['source'], []).append(edge)
+            self._edgesByNode.setdefault(edge['target'], []).append(edge)
+        self._branchCache = {}
+        self._searchCacheKey = None
+        self._searchAllResults = []
+        self._searchCacheResults = []
+
+    def _lt_step_build(self, budget=8):
+        _lt_original_step(self, budget)
+        if self._building:
+            self._lt_reindex_partial()
+            # Layout only at the first publication and at measured intervals;
+            # rebuilding coordinates for every eight labels would starve input.
+            index = self._buildIndex
+            if index <= budget or index % 64 == 0:
+                self._layout()
+        else:
+            # The original method has completed the AST scan. Its final graph
+            # remains authoritative; make sure its indexes/cache are current.
+            self._lt_reindex_partial()
+            self._layout()
+            self._signature = tuple(self._labelNames())
+
+    def _lt_ensure_built(self, budget=4):
+        naturalNames = self._labelNames()
+        naturalSignature = tuple(naturalNames)
+        if self._ready and self._signature == naturalSignature:
+            return
+        buildNames = naturalNames
+        # On the initial build only, put the live label first. This makes the
+        # current node appear in the first background batch without restarting
+        # the entire graph whenever gameplay reaches another label.
+        if not self._building and not self._ready:
+            priority = getattr(self, '_runtimeLabel', None)
+            if not priority:
+                try:
+                    priority = LabelMon.lastLabel
+                except:
+                    priority = None
+            if priority in naturalNames:
+                buildNames = [priority]
+                for name in naturalNames:
+                    if name != priority:
+                        buildNames.append(name)
+        buildSignature = tuple(buildNames)
+        if self._targetSignature != buildSignature or not self._building:
+            self._beginBuild(buildNames)
+        self._stepBuild(budget)
+
+    def _lt_focused_names(self, query='', labels=True, variables=True,
+                          conditions=True, links=True, statements=True,
+                          showInternal=False, showSearched=True,
+                          showCurrent=True):
+        anchors = []
+        results = self._allSearchResults(query, labels, variables, conditions,
+                                         links, statements, showInternal) if query else []
+        selected = self.selectedLabel if self.selectedLabel in self.byName else None
+        current = self.currentLabel()
+        if showSearched and query and results:
+            anchor = selected or results[0]['name']
+            anchors.append(anchor)
+        if showCurrent and current in self.byName and current != 'after_load':
+            if current not in anchors:
+                anchors.append(current)
+            # Ren'Py's return stack identifies the caller/continuation even
+            # when a dynamic call cannot be recovered as a static AST edge.
+            for parent in self._lt_return_stack_labels():
+                if parent not in anchors:
+                    anchors.append(parent)
+        if not anchors:
+            return set()
+        focused = set()
+        for anchor in anchors:
+            focused.update(self._branchNames(anchor))
+        return focused
+
+    def _lt_visible_nodes(self, showInternal=False, query='', labels=True,
+                          variables=True, conditions=True, links=True,
+                          statements=True, showSearched=True, showCurrent=True):
+        if not self._ready and not self.nodes:
+            return []
+        focusedNames = self._focusedNames(query, labels, variables, conditions,
+                                          links, statements, showInternal,
+                                          showSearched, showCurrent)
+        self._layoutFocus(focusedNames)
+        self._applyPendingCenter()
+        try:
+            scale = float(scalePxInt(1))
+        except:
+            scale = 1.0
+        if scale < 1.0:
+            scale = 1.0
+        zoom = self.zoom if self.zoom > 0 else 1.0
+        try:
+            left = self.xAdjustment.value / (scale * zoom) - 320
+            top = self.yAdjustment.value / (scale * zoom) - 320
+        except:
+            left = -320
+            top = -320
+        right = left + (renpy.config.screen_width / (scale * zoom)) + 640
+        bottom = top + (renpy.config.screen_height / (scale * zoom)) + 640
+        current = self.currentLabel()
+        visible = []
+        for name in focusedNames:
+            node = self.byName.get(name)
+            if not node:
+                continue
+            if node['internal'] and not showInternal and node['name'] != current:
+                continue
+            nodeRight = node['x'] + node['width']
+            nodeBottom = node['y'] + node['height']
+            if nodeBottom >= top and node['y'] <= bottom and nodeRight >= left and node['x'] <= right:
+                visible.append(node)
+        return visible
+
+    # Keep the original class and LabelMon intact; only extend the existing
+    # instance with runtime-aware methods.
+    _lt_original_step = LabelTreeClass._stepBuild
+    LabelTreeClass._runtime_callback = _lt_runtime_callback
+    LabelTreeClass._currentLabel = LabelTreeClass.currentLabel
+    LabelTreeClass.currentLabel = _lt_current_label
+    LabelTreeClass._focusedNames = _lt_focused_names
+    LabelTreeClass.ensureBuilt = _lt_ensure_built
+    LabelTreeClass.visibleNodes = _lt_visible_nodes
+    LabelTreeClass._stepBuild = _lt_step_build
+
+    try:
+        LabelTree._runtimeLabel = getattr(LabelTree, '_runtimeLabel', None)
+        LabelTree._runtimeLabelSerial = getattr(LabelTree, '_runtimeLabelSerial', 0)
+        if not getattr(LabelTree, '_runtimeListenerInstalled', False):
+            LabelMon.onLabelCalled.append(LabelTree._runtime_callback)
+            LabelTree._runtimeListenerInstalled = True
+    except:
+        pass
