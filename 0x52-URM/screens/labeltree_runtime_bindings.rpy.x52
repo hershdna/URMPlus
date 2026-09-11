@@ -1,0 +1,6 @@
+# Bind helper methods from the runtime compatibility layer to the existing class.
+# This separate init block runs after labeltree_runtime_fix.rpy.x52.
+
+init 0 python in x52URM:
+    LabelTreeClass._lt_resolve_statement = _lt_resolve_statement
+    LabelTreeClass._lt_return_stack_labels = _lt_return_stack_labels
