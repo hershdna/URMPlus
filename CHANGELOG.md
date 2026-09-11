@@ -3,6 +3,21 @@
 All notable URMPlus changes are recorded here. Release archives use the
 `0x52_URM.patched-vN.rpa` naming convention.
 
+## [v29] - 2026-09-11
+
+### Fixed
+
+- Corrected current-label detection for Ren'Py 7.4.4. The tree now reads the
+  live execution context's current AST statement and resolves it back to its
+  containing label, instead of treating the public context-info object as if
+  it exposed the executing statement.
+- Added an AST-object fallback for opaque or unnamed statement identifiers,
+  while retaining the original URM `LabelMon.lastLabel` callback as a safe
+  fallback during menu, save, and load context transitions.
+- View-filter branches now walk from their entry labels through the complete
+  directed flow to every reachable join and terminal path, including
+  conditional branches, cycles, and implicit fall-through links.
+
 ## [v28] - 2026-09-11
 
 ### Fixed

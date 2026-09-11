@@ -17,8 +17,9 @@ compatible with that environment:
 - Avoid work in screen-expression evaluation that scans the entire game.
 - Defer expensive indexing/layout work and cache results between interactions.
 - Use explicit two-argument min/max helpers where compatibility is important.
-- Treat `renpy.context().current` as a statement identifier, not automatically
-  as a label name.
+- Read the live statement identifier from `renpy.game.context().current` on
+  Ren'Py 7.4.4. The public `renpy.context()` API returns context-info and does
+  not expose the executing AST statement in this engine version.
 - Do not assume a game's labels, variables, or character objects exist.
 - Store cross-session UI preferences only in a mod-specific persistent field;
   use `renpy.save_persistent()` after a preference change.
