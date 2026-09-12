@@ -1,5 +1,23 @@
 # Changelog
 
+## [v46] - 2026-09-11
+
+### Fixed
+
+- Label Tree search now indexes the complete Ren'Py label-name list
+  immediately, so label results and previews are available while the detailed
+  AST graph continues building in the background. Variable, condition, link,
+  and statement matches are refreshed when the full graph is ready.
+- Branch confirmation no longer writes arbitrary dotted object attributes.
+  Only simple scalar variables in the store or persistent store can be
+  changed generically; this prevents a cross-game tool from replacing custom
+  quest objects or engine-managed state that later script code expects to be
+  a collection or object.
+- Diagnosed the reported `q_nurse_roped.rpy` failure as base-game code calling
+  `.add("kate")` on `quest.nurse_roped["exhibition_attractions"]` while that
+  value is an integer. Label Tree now avoids the unsafe generic mutation path
+  that can cause this class of state corruption.
+
 ## [v45] - 2026-09-11
 
 ### Fixed
