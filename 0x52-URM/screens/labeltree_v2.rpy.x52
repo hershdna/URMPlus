@@ -579,6 +579,15 @@ init -2 python in x52URM:
             self._viewportLastObserved = (x, y)
             return True
 
+        def beginViewportSession(self):
+            """Restore the saved viewport whenever Label Tree is reopened."""
+            self._viewportRestorePending = True
+            self._viewportLastObserved = (None, None)
+            try:
+                renpy.restart_interaction()
+            except:
+                pass
+
         def flushSearchPersistence(self):
             self.noteViewportPosition()
             if (not self._searchPersistentPending and
@@ -610,15 +619,21 @@ init -2 python in x52URM:
             if not terms:
                 return True
             fields = node.get('_searchFields') or self._makeSearchFields(node)
-            values = []
+            # A multi-word query is an AND query within one enabled field.
+            # This prevents a label such as replay_else from matching
+            # "nurse replay" merely because one term occurs in its name and
+            # the other appears in an unrelated statement or condition.
             for key in ('labels', 'variables', 'conditions', 'links', 'statements'):
                 if filters.get(key):
-                    values.append(fields.get(key, ''))
-            haystack = ' '.join(values)
-            for token in terms:
-                if token not in haystack:
-                    return False
-            return True
+                    haystack = fields.get(key, '')
+                    matches = True
+                    for token in terms:
+                        if token not in haystack:
+                            matches = False
+                            break
+                    if matches:
+                        return True
+            return False
 
         def _searchScore(self, node, raw, terms, filters):
             fields = node.get('_searchFields') or self._makeSearchFields(node)
@@ -626,14 +641,18 @@ init -2 python in x52URM:
             score = 0
             if raw and raw in labelText:
                 score += 100
-            for token in terms:
-                if token in labelText:
-                    score += 30
-                else:
-                    for key in ('variables', 'conditions', 'links', 'statements'):
-                        if filters.get(key) and token in fields.get(key, ''):
-                            score += 10
-                            break
+            for key in ('labels', 'variables', 'conditions', 'links', 'statements'):
+                if not filters.get(key):
+                    continue
+                fieldText = fields.get(key, '')
+                matches = True
+                for token in terms:
+                    if token not in fieldText:
+                        matches = False
+                        break
+                if matches:
+                    score += 30 if key == 'labels' else 10
+                    break
             return score
 
         def _sortSearchResults(self, results, raw, terms, filters):
@@ -1640,6 +1659,7 @@ screen URM_labeltree_content():
         timer .03 repeat True action Function(x52URM.LabelTree.backgroundTick, 8, 64)
 
     on 'hide' action Function(x52URM.LabelTree.flushSearchPersistence)
+    on 'show' action Function(x52URM.LabelTree.beginViewportSession)
 
     vbox:
         xfill True
