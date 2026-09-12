@@ -1,5 +1,14 @@
 # Changelog
 
+## [v49] - 2026-09-11
+
+### Fixed
+
+- Search results now use their own Ren'Py viewport adjustment and persist its
+  vertical scroll offset independently from the graph canvas. The results
+  sidebar restores its position when Label Tree is reopened, including saved
+  search sessions from earlier releases.
+
 ## [v48] - 2026-09-11
 
 ### Fixed
