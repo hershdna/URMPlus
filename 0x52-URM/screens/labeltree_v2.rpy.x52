@@ -390,6 +390,7 @@ init -2 python in x52URM:
             self._pendingJumpTarget = None
             self._pendingJumpVariables = []
             self._pendingJumpValues = {}
+            self._pendingJumpOriginalValues = {}
             self.labels = names
             self.nodes = []
             self.edges = []
@@ -1154,7 +1155,7 @@ init -2 python in x52URM:
                 exists, currentValue = self._jumpVariableValue(name)
                 if not exists or not self._isJumpScalar(currentValue):
                     continue
-                options = variables[name]
+                options = list(variables[name])
                 if not options:
                     if isinstance(currentValue, bool):
                         options = ['True', 'False']
@@ -1162,8 +1163,15 @@ init -2 python in x52URM:
                         options = [self._safeText(currentValue)]
                     else:
                         continue
+                # Keep the live value as the initial selection. The first
+                # observed branch option is not necessarily the current game
+                # state, and Done must not silently rewrite it.
+                currentText = self._safeText(currentValue)
+                if currentText not in options:
+                    options.insert(0, currentText)
                 result.append({'name': name, 'options': options,
-                               'value': options[0]})
+                               'value': currentText,
+                               'originalValue': currentValue})
             return result
 
         def _executeJump(self, name):
@@ -1180,6 +1188,7 @@ init -2 python in x52URM:
             self._pendingJumpTarget = name
             self._pendingJumpVariables = variables
             self._pendingJumpValues = dict((item['name'], item['value']) for item in variables)
+            self._pendingJumpOriginalValues = dict((item['name'], item.get('originalValue')) for item in variables)
             renpy.show_screen('URM_labeltree_jump_confirm', _layer='x52Overlay')
             renpy.restart_interaction()
 
@@ -1201,6 +1210,7 @@ init -2 python in x52URM:
             self._pendingJumpTarget = None
             self._pendingJumpVariables = []
             self._pendingJumpValues = {}
+            self._pendingJumpOriginalValues = {}
             renpy.hide_screen('URM_labeltree_jump_confirm')
             renpy.hide_screen('URM_labeltree_jump_value_menu')
             renpy.restart_interaction()
@@ -1212,12 +1222,46 @@ init -2 python in x52URM:
             except:
                 return value
 
-        def _setJumpVariable(self, name, value):
+        def _jumpTypesCompatible(self, expected, actual):
+            """Prevent a dropdown from changing a game's variable type."""
+            try:
+                if isinstance(expected, bool):
+                    return isinstance(actual, bool)
+                if isinstance(expected, (int, long)):
+                    return isinstance(actual, (int, long)) and not isinstance(actual, bool)
+                if isinstance(expected, float):
+                    return isinstance(actual, (int, long, float)) and not isinstance(actual, bool)
+                if isinstance(expected, basestring):
+                    return isinstance(actual, basestring)
+            except:
+                if isinstance(expected, bool):
+                    return isinstance(actual, bool)
+                if isinstance(expected, int):
+                    return isinstance(actual, int) and not isinstance(actual, bool)
+                if isinstance(expected, float):
+                    return isinstance(actual, (int, float)) and not isinstance(actual, bool)
+                if isinstance(expected, str):
+                    return isinstance(actual, str)
+            return expected is None and actual is None
+
+        def _setJumpVariable(self, name, value, originalValue=None):
             exists, currentValue = self._jumpVariableValue(name)
             if not exists or not self._isJumpScalar(currentValue):
                 return
+            # Do not overwrite a value that changed while the confirmation
+            # dialog was open. The scene owns its state; Label Tree should not
+            # race it during a long-running interaction.
+            if originalValue is not None and currentValue != originalValue:
+                return
             value = self._jumpValue(value)
             if not self._isJumpScalar(value):
+                return
+            if not self._jumpTypesCompatible(currentValue, value):
+                return
+            # Confirming without changing a dropdown must be a no-op for game
+            # variables. This prevents integers becoming unicode values or
+            # collection-like state being replaced with a scalar.
+            if value == currentValue:
                 return
             try:
                 if name.startswith('persistent.'):
@@ -1241,10 +1285,11 @@ init -2 python in x52URM:
             if not target:
                 return
             for item in self._pendingJumpVariables:
-                self._setJumpVariable(item['name'], self._pendingJumpValues.get(item['name'], item['value']))
+                self._setJumpVariable(item['name'], self._pendingJumpValues.get(item['name'], item['value']), self._pendingJumpOriginalValues.get(item['name']))
             self._pendingJumpTarget = None
             self._pendingJumpVariables = []
             self._pendingJumpValues = {}
+            self._pendingJumpOriginalValues = {}
             renpy.hide_screen('URM_labeltree_jump_confirm')
             renpy.hide_screen('URM_labeltree_jump_value_menu')
             renpy.hide_screen('URM_main')
