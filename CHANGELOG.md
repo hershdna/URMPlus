@@ -1,5 +1,149 @@
 # Changelog
 
+## [v43] - 2026-09-11
+
+### Fixed
+
+- Prevented branch-jump confirmation from overwriting game objects with
+  strings or booleans. Only existing scalar variables are now offered and
+  written; object roots such as `nurse` remain untouched.
+- Added a final scalar-type guard before applying each selected value.
+- Confirmation is now a hard gate whenever enabled: even a branch with no
+  editable scalar variables waits for Done before jumping.
+
+## [v42] - 2026-09-11
+
+### Fixed
+
+- Fixed a Ren'Py screen-variable scope error caused by reading the local
+  search input through `GetScreenInput` during screen evaluation.
+- Label Tree now reads its local `InputValue` with the documented
+  `get_text()` method, while retaining the original URM bridge for action
+  callbacks.
+- Normalizes the returned value through the mod's Python 2.7-safe text helper
+  so non-ASCII queries do not depend on the base interpreter's `str()`
+  conversion.
+
+## [v41] - 2026-09-11
+
+### Fixed
+
+- Fixed incremental searches restarting from index zero on every screen
+  redraw, which left the result count at `0 (searching...)` indefinitely.
+- Reads the Label Tree query through the original URM screen-input bridge for
+  Ren'Py 7.4 compatibility.
+- Fixed the direct-jump helper used when branch confirmation is disabled or
+  no conditional variables are found.
+- Conditional value extraction now recognizes both tuple and list membership
+  expressions.
+
+## [v40] - 2026-09-11
+
+### Added
+
+- Added an optional branch-variable confirmation dialog before Label Tree
+  jumps. Conditional variables are collected from the complete flow, with
+  observed comparison and membership values available from dropdown menus.
+- Added a persistent View Filter toggle for the confirmation dialog.
+
+### Fixed
+
+- Searches now start against the first published partial graph instead of
+  remaining at `0 (searching...)` until the full AST build completes.
+
+## [v39] - 2026-09-11
+
+### Fixed
+
+- Keeps an active search synchronized with labels published by the background
+  AST build, so a search cannot finish against only the first partial graph.
+
+## [v38] - 2026-09-11
+
+### Fixed
+
+- Adds an in-pane searching indicator while large result sets are still being
+  indexed, so partial results are clearly distinguished from the final count.
+
+## [v37] - 2026-09-11
+
+### Added
+
+- Search now accepts context terms in any order. For example, `nurse quest`
+  matches `nurse_quest`, `quest_nurse`, and `nurse_02_quest` when the relevant
+  search fields are enabled.
+- Search indexing runs in small background batches, with ranked results and a
+  debounced persistent query so typing and reopening URM remain responsive.
+
+## [v35] - 2026-09-11
+
+### Fixed
+
+- Places the depth chooser on URM's `x52Overlay` layer so it renders above
+  the Label Tree window instead of underneath the overlay.
+- Removes the remaining Ren'Py load-order dependency in the depth wrapper.
+  Captured module functions are now called directly instead of being assumed
+  to exist as `LabelTreeClass` instance attributes, preventing the
+  `_lt_original_depth_step` launch-time crash.
+
+## [v34] - 2026-09-11
+
+### Fixed
+
+- Binds the runtime graph reindex helper to `LabelTreeClass` before the
+  incremental build wrapper uses it, preventing the launch-time
+  `_lt_reindex_partial` AttributeError on Ren'Py 7.4.
+
+## [v33] - 2026-09-11
+
+### Fixed
+
+- Loads the depth-control overlay explicitly through x52MF2, so the depth
+  chooser and bidirectional branch traversal are active in the runtime archive.
+- Keeps the full-flow default while allowing bounded incoming/outgoing depth
+  around the current, selected, and searched anchors.
+
+## [v32] - 2026-09-11
+
+### Added
+
+- Added a persistent current-branch depth chooser. The default `All` mode
+  shows the complete flow in both directions; bounded modes include the
+  selected number of incoming and outgoing flow edges around each active
+  label.
+- The depth traversal is cached and uses the graph's published partial index,
+  so the view grows as the background build discovers more labels and links.
+
+### Fixed
+
+- The current-branch filter now uses bidirectional adjacency for bounded
+  views, instead of showing only the active label when a full static path is
+  not yet available.
+
+## [v31] - 2026-09-11
+
+### Fixed
+
+- The main x52MF2 loader now explicitly loads all Label Tree runtime overlay
+  sources. Previously those files could be packed into the RPA but remained
+  inactive, leaving only the old single-label view.
+
+## [v30] - 2026-09-11
+
+### Fixed
+
+- Prioritizes the live game label during the initial build so the current
+  label appears before the background scan continues.
+- Observes the original URM label monitor and resolves Ren'Py 7.4 live
+  context, rollback, and return-stack statements back to labels when possible.
+- Publishes partial indexes while scanning so the current branch appears
+  immediately and grows into the complete start-to-finish flow.
+
+### Compatibility
+
+- Guards opaque/unhashable Ren'Py return-stack statement names.
+- The packer now accepts optional extra source files for compatibility overlays.
+
 All notable URMPlus changes are recorded here. Release archives use the
 `0x52_URM.patched-vN.rpa` naming convention.
 
