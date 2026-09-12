@@ -1,5 +1,18 @@
 # Changelog
 
+## [v44] - 2026-09-11
+
+### Fixed
+
+- Confirmation now preserves each variable's live value instead of selecting
+  the first observed branch option by default.
+- Done without a dropdown change no longer writes game variables.
+- Dropdown values must remain compatible with the variable's existing scalar
+  type, preventing day counters from becoming unicode and state collections
+  from being replaced with numeric values.
+- Confirmation skips a variable if the game changed it while the dialog was
+  open, avoiding a race with scene code.
+
 ## [v43] - 2026-09-11
 
 ### Fixed
