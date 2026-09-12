@@ -69,6 +69,10 @@ init -2 python in x52URM:
             self._searchQuery = ''
             self._searchPersistentPending = False
             self._searchPersistentDue = 0
+            self._viewportPersistentPending = False
+            self._viewportPersistentDue = 0
+            self._viewportRestorePending = True
+            self._viewportLastObserved = (None, None)
             self._labelNamesCache = None
             self._branchCache = {}
 
@@ -508,19 +512,80 @@ init -2 python in x52URM:
             self._searchQuery = value
             try:
                 setattr(renpy.game.persistent, '_x52URM_labeltree_query', value)
-                self._searchPersistentPending = True
-                self._searchPersistentDue = time.time() + .35
+                self._schedulePersistentSave()
             except:
                 pass
 
+        def _schedulePersistentSave(self):
+            self._searchPersistentPending = True
+            self._searchPersistentDue = time.time() + .35
+
+        def _safeOffset(self, value):
+            try:
+                value = float(value)
+                return 0.0 if value < 0 else value
+            except:
+                return 0.0
+
+        def _savedViewportState(self):
+            try:
+                state = getattr(renpy.game.persistent,
+                                '_x52URM_labeltree_viewport', None)
+                if isinstance(state, dict):
+                    return (self._safeOffset(state.get('x', 0)),
+                            self._safeOffset(state.get('y', 0)))
+            except:
+                pass
+            return (0.0, 0.0)
+
+        def noteViewportPosition(self):
+            """Queue the current graph offsets with the search preferences.
+
+            Viewport adjustments are updated by Ren'Py during interaction,
+            including mouse-wheel and draggable scrolling. Sampling them once
+            per screen interaction avoids depending on private Adjustment
+            callbacks that differ between Ren'Py releases.
+            """
+            if self._viewportRestorePending:
+                return
+            x = self._safeOffset(getattr(self.xAdjustment, 'value', 0))
+            y = self._safeOffset(getattr(self.yAdjustment, 'value', 0))
+            observed = (x, y)
+            if observed == self._viewportLastObserved:
+                return
+            self._viewportLastObserved = observed
+            try:
+                setattr(renpy.game.persistent,
+                        '_x52URM_labeltree_viewport', {'x': x, 'y': y})
+                self._viewportPersistentPending = True
+                self._viewportPersistentDue = time.time() + .35
+            except:
+                pass
+
+        def _applySavedViewportPosition(self):
+            if not self._viewportRestorePending:
+                return False
+            x, y = self._savedViewportState()
+            try:
+                self.xAdjustment.value = x
+                self.yAdjustment.value = y
+            except:
+                return False
+            self._viewportRestorePending = False
+            self._viewportLastObserved = (x, y)
+            return True
+
         def flushSearchPersistence(self):
-            if not self._searchPersistentPending:
+            self.noteViewportPosition()
+            if (not self._searchPersistentPending and
+                    not self._viewportPersistentPending):
                 return
             try:
                 renpy.save_persistent()
             except:
                 return
             self._searchPersistentPending = False
+            self._viewportPersistentPending = False
 
         def _searchTerms(self, query):
             raw = self._safeText(query, '').strip().lower()
@@ -613,10 +678,16 @@ init -2 python in x52URM:
             return self._searchBuilding
 
         def needsBackgroundTick(self):
-            return self._building or self._searchBuilding or self._searchPersistentPending
+            return (self._building or self._searchBuilding or
+                    self._searchPersistentPending or
+                    self._viewportPersistentPending or
+                    self._viewportRestorePending)
 
         def backgroundTick(self, buildBudget=8, searchBudget=64):
             changed = False
+            if self._viewportRestorePending:
+                changed = self._applySavedViewportPosition() or changed
+            self.noteViewportPosition()
             if self._building:
                 self._stepBuild(buildBudget)
                 changed = True
@@ -1477,6 +1548,7 @@ screen URM_labeltree_content():
     python:
         x52URM.LabelTree.ensureBuilt(8)
         x52URM.LabelTree.centerCurrent()
+        x52URM.LabelTree.noteViewportPosition()
         # InputValue is the Ren'Py contract for screen input. Read through
         # get_text() instead of relying on implementation-specific attributes.
         # This is a screen-local InputValue. Ren'Py's documented contract is

@@ -15,6 +15,14 @@ init -2 python in x52URM:
             if loader is None:
                 return False
             loader.loadFile('0x52-URM/screens/labeltree_v2.rpy.x52', 'x52URM')
+            # Load the runtime compatibility layers after the main Label Tree
+            # source. The x52MF2 loader does not automatically discover extra
+            # .rpy.x52 files from the archive, so omitting these leaves the
+            # graph on the old single-label behavior.
+            loader.loadFile('0x52-URM/screens/labeltree_runtime_fix.rpy.x52', 'x52URM')
+            loader.loadFile('0x52-URM/screens/labeltree_runtime_bindings.rpy.x52', 'x52URM')
+            loader.loadFile('0x52-URM/screens/labeltree_runtime_safety.rpy.x52', 'x52URM')
+            loader.loadFile('0x52-URM/screens/labeltree_depth.rpy.x52', 'x52URM')
             LabelTreeSourceLoaded = True
         return True
 
@@ -96,6 +104,17 @@ screen URM_main():
     layer 'x52Overlay'
     style_prefix "x52URM"
     modal True
+
+    # The modal flag prevents lower screens from receiving events, but a
+    # transparent gap inside a composed displayable can still be treated as
+    # unhandled by Ren'Py. Keep a full-screen, no-op button behind the window
+    # so clicks in empty viewport space never activate the game underneath.
+    button:
+        xfill True
+        yfill True
+        action NullAction()
+        background None
+        hover_background None
 
     key "ctrl_K_n" action x52URM.URMFiles.Clear()
     key "ctrl_K_o" action x52URM.URMFiles.Load()
