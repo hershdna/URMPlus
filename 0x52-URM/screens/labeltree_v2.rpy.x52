@@ -1652,7 +1652,10 @@ screen URM_labeltree_content():
                 button:
                     xfill True
                     key_events True
-                    sensitive not x52URM.LabelTree.isBuilding()
+                    # Search is intentionally available while the graph is
+                    # being built. Label-name candidates come from Ren'Py's
+                    # complete label index, and richer AST fields are added
+                    # by the background search pass.
                     action searchInput.Enable()
                     input value searchInput
             textbutton '\ue880' style_suffix 'icon_button' action x52URM.LabelTree.clearFocus hovered x52URM.Tooltip('{urm_notl}Clear search focus{/urm_notl}') unhovered x52URM.Tooltip()
