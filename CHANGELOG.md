@@ -1,5 +1,17 @@
 # Changelog
 
+## [v45] - 2026-09-11
+
+### Fixed
+
+- Added a transparent Ren'Py event sink behind the URM window so clicks in
+  empty Label Tree viewport space cannot activate the game underneath.
+- Label Tree search persistence now also stores and restores the graph's
+  horizontal and vertical viewport positions.
+- Viewport persistence is sampled during normal Ren'Py interactions and saved
+  with the existing debounced search-state persistence, avoiding private
+  engine callbacks and keeping mouse-wheel/drag navigation responsive.
+
 ## [v44] - 2026-09-11
 
 ### Fixed
