@@ -58,6 +58,17 @@ init -2 python in x52URM:
             self._searchCacheKey = None
             self._searchCacheResults = []
             self._searchAllResults = []
+            self._searchBuildKey = None
+            self._searchBuildIndex = 0
+            self._searchBuildResults = []
+            self._searchBuildRaw = ''
+            self._searchBuildTerms = []
+            self._searchBuildFilters = {}
+            self._searchBuildShowInternal = False
+            self._searchBuilding = False
+            self._searchQuery = ''
+            self._searchPersistentPending = False
+            self._searchPersistentDue = 0
             self._labelNamesCache = None
             self._branchCache = {}
 
@@ -73,6 +84,7 @@ init -2 python in x52URM:
             'showInternal': False,
             'showSearchedBranches': False,
             'showCurrentBranch': True,
+            'confirmBranchJump': True,
         }
 
         def getFilter(self, name, fallback=None):
@@ -370,7 +382,14 @@ init -2 python in x52URM:
             self._searchCacheKey = None
             self._searchCacheResults = []
             self._searchAllResults = []
+            self._searchBuildKey = None
+            self._searchBuildIndex = 0
+            self._searchBuildResults = []
+            self._searchBuilding = False
             self._branchCache = {}
+            self._pendingJumpTarget = None
+            self._pendingJumpVariables = []
+            self._pendingJumpValues = {}
             self.labels = names
             self.nodes = []
             self.edges = []
@@ -464,6 +483,147 @@ init -2 python in x52URM:
             # on large games.
             if self._building:
                 self._stepBuild(budget)
+                renpy.restart_interaction()
+
+        def savedSearchQuery(self):
+            """Return the last Label Tree query without touching game globals."""
+            try:
+                return self._safeText(getattr(renpy.game.persistent,
+                                              '_x52URM_labeltree_query', ''), '')
+            except:
+                return ''
+
+        def setSearchQuery(self, query):
+            """Keep the query alive across URM screen hide/show cycles.
+
+            The persistent object is updated immediately so reopening URM in
+            the same session never loses the text. Disk persistence is
+            debounced and performed by the background tick, avoiding a costly
+            save-persistent call for every keystroke.
+            """
+            value = self._safeText(query, '')
+            if value == self._searchQuery:
+                return
+            self._searchQuery = value
+            try:
+                setattr(renpy.game.persistent, '_x52URM_labeltree_query', value)
+                self._searchPersistentPending = True
+                self._searchPersistentDue = time.time() + .35
+            except:
+                pass
+
+        def flushSearchPersistence(self):
+            if not self._searchPersistentPending:
+                return
+            try:
+                renpy.save_persistent()
+            except:
+                return
+            self._searchPersistentPending = False
+
+        def _searchTerms(self, query):
+            raw = self._safeText(query, '').strip().lower()
+            terms = []
+            # Treat spaces, underscores, and punctuation as token separators.
+            # Thus "nurse quest" matches nurse_quest, quest_nurse, and
+            # nurse_02_quest when both tokens are present in an enabled field.
+            for token in re.findall(r'[A-Za-z0-9]+', raw):
+                if token not in terms:
+                    terms.append(token)
+            if raw and not terms:
+                terms = [raw]
+            return raw, terms
+
+        def _searchMatchesTerms(self, node, terms, filters, showInternal):
+            if node['internal'] and not showInternal:
+                return False
+            if not terms:
+                return True
+            fields = node.get('_searchFields') or self._makeSearchFields(node)
+            values = []
+            for key in ('labels', 'variables', 'conditions', 'links', 'statements'):
+                if filters.get(key):
+                    values.append(fields.get(key, ''))
+            haystack = ' '.join(values)
+            for token in terms:
+                if token not in haystack:
+                    return False
+            return True
+
+        def _searchScore(self, node, raw, terms, filters):
+            fields = node.get('_searchFields') or self._makeSearchFields(node)
+            labelText = fields.get('labels', '')
+            score = 0
+            if raw and raw in labelText:
+                score += 100
+            for token in terms:
+                if token in labelText:
+                    score += 30
+                else:
+                    for key in ('variables', 'conditions', 'links', 'statements'):
+                        if filters.get(key) and token in fields.get(key, ''):
+                            score += 10
+                            break
+            return score
+
+        def _sortSearchResults(self, results, raw, terms, filters):
+            ranked = []
+            for position, node in enumerate(results):
+                ranked.append((-self._searchScore(node, raw, terms, filters),
+                               node['name'].lower(), position, node))
+            ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+            return [item[3] for item in ranked]
+
+        def _startSearchBuild(self, cacheKey, raw, terms, filters,
+                              showInternal):
+            self._searchBuildKey = cacheKey
+            self._searchBuildIndex = 0
+            self._searchBuildResults = []
+            self._searchBuildRaw = raw
+            self._searchBuildTerms = terms
+            self._searchBuildFilters = filters
+            self._searchBuildShowInternal = showInternal
+            self._searchBuilding = True
+            self._searchAllResults = []
+            self._searchCacheResults = []
+
+        def _stepSearchBuild(self, budget=64):
+            if not self._searchBuilding:
+                return False
+            endIndex = self._min2(len(self.nodes),
+                                  self._searchBuildIndex + budget)
+            while self._searchBuildIndex < endIndex:
+                node = self.nodes[self._searchBuildIndex]
+                if self._searchMatchesTerms(node, self._searchBuildTerms,
+                                             self._searchBuildFilters,
+                                             self._searchBuildShowInternal):
+                    self._searchBuildResults.append(node)
+                self._searchBuildIndex += 1
+            self._searchAllResults = self._sortSearchResults(
+                self._searchBuildResults, self._searchBuildRaw,
+                self._searchBuildTerms, self._searchBuildFilters)
+            self._searchCacheResults = self._searchAllResults[:12]
+            if self._searchBuildIndex >= len(self.nodes):
+                self._searchBuilding = False
+                self._searchCacheKey = self._searchBuildKey
+            return True
+
+        def isSearchBuilding(self):
+            return self._searchBuilding
+
+        def needsBackgroundTick(self):
+            return self._building or self._searchBuilding or self._searchPersistentPending
+
+        def backgroundTick(self, buildBudget=8, searchBudget=64):
+            changed = False
+            if self._building:
+                self._stepBuild(buildBudget)
+                changed = True
+            if self._searchBuilding:
+                changed = self._stepSearchBuild(searchBudget) or changed
+            if self._searchPersistentPending and time.time() >= self._searchPersistentDue:
+                self.flushSearchPersistence()
+            if changed:
                 renpy.restart_interaction()
 
         def isBuilding(self):
@@ -884,8 +1044,7 @@ init -2 python in x52URM:
             # jump. Returning a value also ends the screen interaction cleanly.
             if previousName == name and now - previousTime < .65:
                 self._lastClick = (None, 0)
-                renpy.hide_screen('URM_main')
-                renpy.jump(name)
+                self.prepareJump(name)
                 return True
             else:
                 renpy.restart_interaction()
@@ -911,6 +1070,186 @@ init -2 python in x52URM:
             self._pendingCenter = self.currentLabel()
             renpy.restart_interaction()
 
+        def _conditionalVariableName(self, name):
+            ignored = set(['and', 'or', 'not', 'True', 'False', 'None', 'always',
+                           'renpy', 'store', 'persistent', 'game', 'config',
+                           'getattr', 'hasattr', 'isinstance', 'len', 'str',
+                           'int', 'float', 'bool', 'list', 'dict', 'set'])
+            if not name or name in ignored or name.startswith('_'):
+                return False
+            return name[0].isalpha() or name[0] == '_'
+
+        def _conditionalValues(self, text, variables):
+            text = self._safeText(text, '').strip()
+            if not text:
+                return
+            # Capture values from the common Ren'Py/Python conditional forms.
+            comparison = r'([A-Za-z_][A-Za-z0-9_.]*)\s*(?:==|!=|<=|>=|<|>)\s*([^\s\)\]\},&|]+)'
+            for match in re.findall(comparison, text):
+                name, value = match
+                if self._conditionalVariableName(name):
+                    variables.setdefault(name, [])
+                    value = value.strip().rstrip(':')
+                    if value and value not in variables[name]:
+                        variables[name].append(value)
+            membership = r'([A-Za-z_][A-Za-z0-9_.]*)\s+in\s*[\(\[]([^\)\]]*)[\)\]]'
+            for match in re.findall(membership, text):
+                name, values = match
+                if self._conditionalVariableName(name):
+                    variables.setdefault(name, [])
+                    for value in values.split(','):
+                        value = value.strip()
+                        if value and value not in variables[name]:
+                            variables[name].append(value)
+            for name in self._variables(text):
+                if self._conditionalVariableName(name):
+                    variables.setdefault(name, [])
+
+        def _jumpVariableValue(self, name):
+            """Resolve a candidate without invoking game code."""
+            try:
+                if name.startswith('persistent.'):
+                    owner = renpy.game.persistent
+                    path = name[11:]
+                elif name.startswith('store.'):
+                    owner = renpy.store
+                    path = name[6:]
+                else:
+                    owner = renpy.store
+                    path = name
+                if not path:
+                    return False, None
+                for part in path.split('.'):
+                    if not hasattr(owner, part):
+                        return False, None
+                    owner = getattr(owner, part)
+                return True, owner
+            except:
+                return False, None
+
+        def _isJumpScalar(self, value):
+            # Never overwrite game objects, containers, Characters, or custom
+            # engine state. The confirmation UI is allowed to edit only
+            # scalar values that the game's conditional logic can safely read.
+            try:
+                return isinstance(value, (bool, int, long, float, basestring)) or value is None
+            except:
+                return isinstance(value, (bool, int, float, basestring)) or value is None
+
+        def _branchJumpVariables(self, target):
+            variables = {}
+            branchNames = self._branchNames(target)
+            for edge in self.edges:
+                if edge['source'] in branchNames and edge['target'] in branchNames:
+                    self._conditionalValues(edge.get('condition'), variables)
+            for name in branchNames:
+                node = self.byName.get(name)
+                if not node:
+                    continue
+                for detail in node.get('details', []):
+                    if detail.get('kind') in ('if', 'elif', 'else', 'while', 'menu'):
+                        self._conditionalValues(detail.get('condition') or detail.get('text'), variables)
+            result = []
+            for name in sorted(variables.keys(), key=lambda value: value.lower()):
+                exists, currentValue = self._jumpVariableValue(name)
+                if not exists or not self._isJumpScalar(currentValue):
+                    continue
+                options = variables[name]
+                if not options:
+                    if isinstance(currentValue, bool):
+                        options = ['True', 'False']
+                    elif currentValue is not None:
+                        options = [self._safeText(currentValue)]
+                    else:
+                        continue
+                result.append({'name': name, 'options': options,
+                               'value': options[0]})
+            return result
+
+        def _executeJump(self, name):
+            # Keep the actual jump on the Ren'Py side of the boundary. This
+            # helper is also used when confirmation is disabled or when a
+            # branch contains no detected variables.
+            renpy.hide_screen('URM_main')
+            renpy.jump(name)
+
+        def prepareJump(self, name):
+            if not self.getFilter('confirmBranchJump', True):
+                return self._executeJump(name)
+            variables = self._branchJumpVariables(name)
+            self._pendingJumpTarget = name
+            self._pendingJumpVariables = variables
+            self._pendingJumpValues = dict((item['name'], item['value']) for item in variables)
+            renpy.show_screen('URM_labeltree_jump_confirm', _layer='x52Overlay')
+            renpy.restart_interaction()
+
+        def pendingJumpVariables(self):
+            return self._pendingJumpVariables
+
+        def pendingJumpValue(self, name):
+            return self._pendingJumpValues.get(name, '')
+
+        def setPendingJumpValue(self, name, value):
+            if name in self._pendingJumpValues:
+                self._pendingJumpValues[name] = value
+            try:
+                renpy.restart_interaction()
+            except:
+                pass
+
+        def cancelPendingJump(self):
+            self._pendingJumpTarget = None
+            self._pendingJumpVariables = []
+            self._pendingJumpValues = {}
+            renpy.hide_screen('URM_labeltree_jump_confirm')
+            renpy.hide_screen('URM_labeltree_jump_value_menu')
+            renpy.restart_interaction()
+
+        def _jumpValue(self, value):
+            value = self._safeText(value, '').strip()
+            try:
+                return renpy.python.py_eval(value)
+            except:
+                return value
+
+        def _setJumpVariable(self, name, value):
+            exists, currentValue = self._jumpVariableValue(name)
+            if not exists or not self._isJumpScalar(currentValue):
+                return
+            value = self._jumpValue(value)
+            if not self._isJumpScalar(value):
+                return
+            try:
+                if name.startswith('persistent.'):
+                    owner = renpy.game.persistent
+                    path = name[11:]
+                elif name.startswith('store.'):
+                    owner = renpy.store
+                    path = name[6:]
+                else:
+                    owner = renpy.store
+                    path = name
+                parts = path.split('.')
+                for part in parts[:-1]:
+                    owner = getattr(owner, part)
+                setattr(owner, parts[-1], value)
+            except:
+                pass
+
+        def confirmPendingJump(self):
+            target = self._pendingJumpTarget
+            if not target:
+                return
+            for item in self._pendingJumpVariables:
+                self._setJumpVariable(item['name'], self._pendingJumpValues.get(item['name'], item['value']))
+            self._pendingJumpTarget = None
+            self._pendingJumpVariables = []
+            self._pendingJumpValues = {}
+            renpy.hide_screen('URM_labeltree_jump_confirm')
+            renpy.hide_screen('URM_labeltree_jump_value_menu')
+            renpy.hide_screen('URM_main')
+            renpy.jump(target)
+
         def _makeSearchFields(self, node):
             fields = {'labels': node['name'].lower(), 'variables': [], 'conditions': [], 'links': [], 'statements': []}
             for detail in node['details']:
@@ -929,35 +1268,36 @@ init -2 python in x52URM:
             return fields
 
         def _matches(self, node, query, filters, showInternal):
-            if node['internal'] and not showInternal:
-                return False
-            query = (query or '').strip().lower()
-            if not query:
-                return True
-            fields = node.get('_searchFields') or self._makeSearchFields(node)
-            values = []
-            for key in ('labels', 'variables', 'conditions', 'links', 'statements'):
-                if filters.get(key):
-                    values.append(fields.get(key, ''))
-            haystack = ' '.join(values)
-            return query in haystack
+            raw, terms = self._searchTerms(query)
+            return self._searchMatchesTerms(node, terms, filters, showInternal)
 
         def _allSearchResults(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
-            if not self._ready:
+            # Search the incrementally published node index. Waiting for the
+            # final ready flag made the UI display 0 (searching...) while the
+            # background graph was already usable.
+            if not self.nodes:
                 return []
-            query = (query or '').strip().lower()
-            cacheKey = (query, bool(labels), bool(variables), bool(conditions), bool(links), bool(statements), bool(showInternal))
-            if cacheKey == self._searchCacheKey:
+            raw, terms = self._searchTerms(query)
+            cacheKey = (raw, tuple(terms), bool(labels), bool(variables), bool(conditions), bool(links), bool(statements), bool(showInternal))
+            if not raw:
+                self._searchBuildKey = None
+                self._searchBuilding = False
+                self._searchAllResults = []
+                self._searchCacheResults = []
+                self._searchCacheKey = cacheKey
+                return []
+            if cacheKey == self._searchBuildKey:
+                # The AST graph may still be publishing nodes in the
+                # background. Continue the same search at the newly appended
+                # node index instead of returning a prematurely complete
+                # result set.
+                if self._searchBuildIndex >= len(self.nodes):
+                    return self._searchAllResults
+                self._searchBuilding = True
                 return self._searchAllResults
             filters = {'labels': labels, 'variables': variables, 'conditions': conditions, 'links': links, 'statements': statements}
-            results = []
-            for node in self.nodes:
-                if self._matches(node, query, filters, showInternal):
-                    results.append(node)
-            self._searchCacheKey = cacheKey
-            self._searchAllResults = results
-            self._searchCacheResults = results[:12]
-            return results
+            self._startSearchBuild(cacheKey, raw, terms, filters, showInternal)
+            return self._searchAllResults
 
         def searchResults(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
             self._allSearchResults(query, labels, variables, conditions, links, statements, showInternal)
@@ -1074,7 +1414,7 @@ screen URM_labeltree_content():
     style_prefix 'x52URM'
     # Match the working URM search fields: keyboard builds start focused, while
     # touch builds wait for an explicit tap on the field.
-    default searchInput = x52URM.Input(autoFocus=not renpy.variant('touch'))
+    default searchInput = x52URM.Input(text=x52URM.LabelTree.savedSearchQuery(), autoFocus=not renpy.variant('touch'))
     default showInternal = x52URM.LabelTree.getFilter('showInternal', False)
     default filterLabels = x52URM.LabelTree.getFilter('filterLabels', True)
     default filterVariables = x52URM.LabelTree.getFilter('filterVariables', True)
@@ -1087,13 +1427,23 @@ screen URM_labeltree_content():
     default viewFilterOpen = False
     default showSearchedBranches = x52URM.LabelTree.getFilter('showSearchedBranches', False)
     default showCurrentBranch = x52URM.LabelTree.getFilter('showCurrentBranch', True)
+    default confirmBranchJump = x52URM.LabelTree.getFilter('confirmBranchJump', True)
 
     python:
         x52URM.LabelTree.ensureBuilt(8)
         x52URM.LabelTree.centerCurrent()
         # InputValue is the Ren'Py contract for screen input. Read through
         # get_text() instead of relying on implementation-specific attributes.
-        queryText = str(searchInput.get_text())
+        # This is a screen-local InputValue. Ren'Py's documented contract is
+        # get_text()/set_text(); GetScreenInput is an action-time bridge for
+        # callbacks and cannot resolve this local variable during screen
+        # evaluation.
+        try:
+            queryText = searchInput.get_text()
+        except:
+            queryText = ''
+        queryText = x52URM.LabelTree._safeText(queryText, '')
+        x52URM.LabelTree.setSearchQuery(queryText)
         allSearchResults = x52URM.LabelTree.searchResultsAll(queryText, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
         searchMatchCount = len(allSearchResults)
         resultsPaneWidth = x52URM.scalePxInt(320)
@@ -1107,8 +1457,13 @@ screen URM_labeltree_content():
 
     key 'mousedown_4' action Function(x52URM.LabelTree.zoomIn)
     key 'mousedown_5' action Function(x52URM.LabelTree.zoomOut)
-    if x52URM.LabelTree.isBuilding():
-        timer .02 repeat True action Function(x52URM.LabelTree.buildTick, 8)
+    if x52URM.LabelTree.needsBackgroundTick():
+        # Keep AST construction, search indexing, and debounced persistence
+        # off the input interaction. Small timer batches keep typing and
+        # dragging responsive even when a game has thousands of labels.
+        timer .03 repeat True action Function(x52URM.LabelTree.backgroundTick, 8, 64)
+
+    on 'hide' action Function(x52URM.LabelTree.flushSearchPersistence)
 
     vbox:
         xfill True
@@ -1137,6 +1492,7 @@ screen URM_labeltree_content():
             null width x52URM.scalePxInt(8)
             textbutton '{urm_notl}Current{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.centerCurrentNow) hovered x52URM.Tooltip('{urm_notl}Center current label{/urm_notl}') unhovered x52URM.Tooltip()
             textbutton '{urm_notl}Selected{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.centerSelected) hovered x52URM.Tooltip('{urm_notl}Center selected node{/urm_notl}') unhovered x52URM.Tooltip()
+            textbutton x52URM.LabelTree.depthText() style_suffix 'buttonSecondary' action Show('URM_labeltree_depth_menu') hovered x52URM.Tooltip('{urm_notl}Choose current-branch depth{/urm_notl}') unhovered x52URM.Tooltip()
             textbutton x52URM.LabelTree.zoomPercentText() style_suffix 'icon_button' action Function(x52URM.LabelTree.zoomReset) hovered x52URM.Tooltip('{urm_notl}Reset zoom{/urm_notl}') unhovered x52URM.Tooltip()
             textbutton '\ue5d5' style_suffix 'icon_button' action Function(x52URM.LabelTree.refresh) hovered x52URM.Tooltip('{urm_notl}Refresh tree{/urm_notl}') unhovered x52URM.Tooltip()
         null height x52URM.scalePxInt(6)
@@ -1226,6 +1582,7 @@ screen URM_labeltree_content():
                                 text '{urm_notl}Show branches{/urm_notl}' style_suffix 'description'
                                 use x52URM_checkbox(showSearchedBranches, '{urm_notl}Searched branches{/urm_notl}', [SetLocalVariable('showSearchedBranches', not showSearchedBranches), Function(x52URM.LabelTree.setFilter, 'showSearchedBranches', not showSearchedBranches)])
                                 use x52URM_checkbox(showCurrentBranch, '{urm_notl}Current branch{/urm_notl}', [SetLocalVariable('showCurrentBranch', not showCurrentBranch), Function(x52URM.LabelTree.setFilter, 'showCurrentBranch', not showCurrentBranch)])
+                                use x52URM_checkbox(confirmBranchJump, '{urm_notl}Confirm branch values before jump{/urm_notl}', [SetLocalVariable('confirmBranchJump', not confirmBranchJump), Function(x52URM.LabelTree.setFilter, 'confirmBranchJump', not confirmBranchJump)])
             if queryText and resultsPaneOpen:
                 frame:
                     xsize resultsPaneWidth
@@ -1237,6 +1594,8 @@ screen URM_labeltree_content():
                         hbox:
                             xfill True
                             text 'Matches: {}'.format(searchMatchCount) style_suffix 'description' yalign .5
+                            if x52URM.LabelTree.isSearchBuilding():
+                                text '{urm_notl}(searching...){/urm_notl}' style_suffix 'description' yalign .5
                             null width x52URM.scalePxInt(8)
                             textbutton '{urm_notl}Previous{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.navigateSearch, queryText, -1, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
                             textbutton '{urm_notl}Next{/urm_notl}' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.navigateSearch, queryText, 1, filterLabels, filterVariables, filterConditions, filterLinks, filterStatements, showInternal)
@@ -1266,3 +1625,61 @@ screen URM_labeltree_content():
                     yfill True
                     background x52URM.Theme.colors.buttonBg
                     textbutton '\ue5c9' style_suffix 'icon_button' action SetLocalVariable('resultsPaneOpen', True) hovered x52URM.Tooltip('{urm_notl}Expand results pane{/urm_notl}') unhovered x52URM.Tooltip()
+
+
+screen URM_labeltree_jump_confirm():
+    layer 'x52Overlay'
+    modal True
+    zorder 1100
+    style_prefix 'x52URM'
+    frame:
+        xalign .5
+        yalign .5
+        xmaximum x52URM.scalePxInt(620)
+        background x52URM.Theme.colors.buttonBg
+        padding (x52URM.scalePxInt(16), x52URM.scalePxInt(12))
+        vbox:
+            spacing x52URM.scalePxInt(6)
+            text 'Confirm branch variables' style_suffix 'header_text'
+            text 'Choose values for conditional variables before jumping to:' style_suffix 'description'
+            text x52URM.LabelTree._pendingJumpTarget substitute False
+            if not x52URM.LabelTree.pendingJumpVariables():
+                text 'No editable scalar variables were detected. Click Done to continue, or Cancel to stay here.' style_suffix 'description'
+            viewport:
+                ymaximum x52URM.scalePxInt(360)
+                mousewheel True
+                draggable True
+                scrollbars 'vertical'
+                vbox:
+                    spacing x52URM.scalePxInt(3)
+                    for item in x52URM.LabelTree.pendingJumpVariables():
+                        hbox:
+                            xfill True
+                            text item['name'] substitute False xmaximum x52URM.scalePxInt(310)
+                            null width x52URM.scalePxInt(8)
+                            textbutton x52URM.LabelTree.pendingJumpValue(item['name']) substitute False style_suffix 'buttonSecondary' action Show('URM_labeltree_jump_value_menu', variable=item['name'])
+            hbox:
+                xalign .5
+                spacing x52URM.scalePxInt(8)
+                textbutton 'Cancel' style_suffix 'buttonSecondary' action Function(x52URM.LabelTree.cancelPendingJump)
+                textbutton 'Done' style_suffix 'buttonPrimary' action Function(x52URM.LabelTree.confirmPendingJump)
+
+
+screen URM_labeltree_jump_value_menu(variable):
+    layer 'x52Overlay'
+    modal True
+    zorder 1200
+    style_prefix 'x52URM'
+    frame:
+        xalign .5
+        yalign .5
+        background x52URM.Theme.colors.buttonBg
+        padding (x52URM.scalePxInt(12), x52URM.scalePxInt(10))
+        vbox:
+            spacing x52URM.scalePxInt(3)
+            text variable substitute False style_suffix 'header_text'
+            for item in x52URM.LabelTree.pendingJumpVariables():
+                if item['name'] == variable:
+                    for option in item['options']:
+                        textbutton option substitute False xfill True style_suffix 'buttonSecondary' action [Function(x52URM.LabelTree.setPendingJumpValue, variable, option), Hide('URM_labeltree_jump_value_menu')]
+            textbutton 'Cancel' style_suffix 'buttonSecondary' xfill True action Hide('URM_labeltree_jump_value_menu')
