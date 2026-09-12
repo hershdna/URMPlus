@@ -33,6 +33,7 @@ init -2 python in x52URM:
             self._lastCenteredCurrent = None
             self.zoom = 1.0
             self._targetSignature = None
+            self._buildRevision = 0
             self._building = False
             self._ready = False
             self._buildNames = []
@@ -61,6 +62,7 @@ init -2 python in x52URM:
             self._searchBuildKey = None
             self._searchBuildIndex = 0
             self._searchBuildResults = []
+            self._searchBuildNodes = []
             self._searchBuildRaw = ''
             self._searchBuildTerms = []
             self._searchBuildFilters = {}
@@ -389,6 +391,7 @@ init -2 python in x52URM:
             self._searchBuildKey = None
             self._searchBuildIndex = 0
             self._searchBuildResults = []
+            self._searchBuildNodes = []
             self._searchBuilding = False
             self._branchCache = {}
             self._pendingJumpTarget = None
@@ -469,6 +472,7 @@ init -2 python in x52URM:
             self._searchCacheResults = []
             self._searchAllResults = []
             self._signature = self._targetSignature
+            self._buildRevision += 1
             self._building = False
             self._ready = True
             self._buildProgress = 100
@@ -645,6 +649,7 @@ init -2 python in x52URM:
             self._searchBuildKey = cacheKey
             self._searchBuildIndex = 0
             self._searchBuildResults = []
+            self._searchBuildNodes = self._searchCandidateNodes()
             self._searchBuildRaw = raw
             self._searchBuildTerms = terms
             self._searchBuildFilters = filters
@@ -656,10 +661,10 @@ init -2 python in x52URM:
         def _stepSearchBuild(self, budget=64):
             if not self._searchBuilding:
                 return False
-            endIndex = self._min2(len(self.nodes),
+            endIndex = self._min2(len(self._searchBuildNodes),
                                   self._searchBuildIndex + budget)
             while self._searchBuildIndex < endIndex:
-                node = self.nodes[self._searchBuildIndex]
+                node = self._searchBuildNodes[self._searchBuildIndex]
                 if self._searchMatchesTerms(node, self._searchBuildTerms,
                                              self._searchBuildFilters,
                                              self._searchBuildShowInternal):
@@ -669,7 +674,7 @@ init -2 python in x52URM:
                 self._searchBuildResults, self._searchBuildRaw,
                 self._searchBuildTerms, self._searchBuildFilters)
             self._searchCacheResults = self._searchAllResults[:12]
-            if self._searchBuildIndex >= len(self.nodes):
+            if self._searchBuildIndex >= len(self._searchBuildNodes):
                 self._searchBuilding = False
                 self._searchCacheKey = self._searchBuildKey
             return True
@@ -1208,6 +1213,28 @@ init -2 python in x52URM:
             except:
                 return isinstance(value, (bool, int, float, basestring)) or value is None
 
+        def _isSafeJumpVariableName(self, name):
+            """Allow confirmation writes only to simple store variables.
+
+            A Ren'Py conditional can mention arbitrary game-engine paths such
+            as ``quest.nurse_roped``.  Even when the current value happens to
+            be a scalar, assigning to an object attribute can violate that
+            game's invariants and break later script code.  Label Tree is a
+            cross-game tool, so only plain store/persistent roots are safe to
+            edit generically.  Nested paths remain searchable, but are never
+            written by the confirmation dialog.
+            """
+            name = self._safeText(name, '').strip()
+            if not name:
+                return False
+            if name.startswith('persistent.'):
+                path = name[11:]
+            elif name.startswith('store.'):
+                path = name[6:]
+            else:
+                path = name
+            return re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', path) is not None
+
         def _branchJumpVariables(self, target):
             variables = {}
             branchNames = self._branchNames(target)
@@ -1223,6 +1250,8 @@ init -2 python in x52URM:
                         self._conditionalValues(detail.get('condition') or detail.get('text'), variables)
             result = []
             for name in sorted(variables.keys(), key=lambda value: value.lower()):
+                if not self._isSafeJumpVariableName(name):
+                    continue
                 exists, currentValue = self._jumpVariableValue(name)
                 if not exists or not self._isJumpScalar(currentValue):
                     continue
@@ -1316,6 +1345,11 @@ init -2 python in x52URM:
             return expected is None and actual is None
 
         def _setJumpVariable(self, name, value, originalValue=None):
+            # Do not assign through arbitrary object attributes.  This is a
+            # final defensive check in case a caller supplies a variable
+            # outside the normal confirmation-collection path.
+            if not self._isSafeJumpVariableName(name):
+                return
             exists, currentValue = self._jumpVariableValue(name)
             if not exists or not self._isJumpScalar(currentValue):
                 return
@@ -1383,18 +1417,43 @@ init -2 python in x52URM:
                     fields[key] = ' '.join(fields[key]).lower()
             return fields
 
+        def _searchCandidateNodes(self):
+            """Return searchable label entries without requiring AST completion.
+
+            Ren'Py exposes the complete label-name set before the incremental
+            AST walk finishes. Use lightweight entries for labels not yet
+            published into ``byName`` so label searches and previews work
+            immediately; completed nodes transparently contribute their
+            variables, conditions, links, and statements as they become
+            available.
+            """
+            candidates = []
+            for name in self._labelNames():
+                node = self.byName.get(name)
+                if node is None:
+                    node = {
+                        'name': name,
+                        'displayName': self._wrapLabel(name),
+                        'details': [],
+                        'internal': name.startswith('_'),
+                        'kind': 'Internal' if name.startswith('_') else 'Label',
+                    }
+                    node['_searchFields'] = self._makeSearchFields(node)
+                candidates.append(node)
+            return candidates
+
         def _matches(self, node, query, filters, showInternal):
             raw, terms = self._searchTerms(query)
             return self._searchMatchesTerms(node, terms, filters, showInternal)
 
         def _allSearchResults(self, query, labels=True, variables=True, conditions=True, links=True, statements=True, showInternal=False):
-            # Search the incrementally published node index. Waiting for the
-            # final ready flag made the UI display 0 (searching...) while the
-            # background graph was already usable.
-            if not self.nodes:
-                return []
+            # Search the complete label-name index immediately. AST-backed
+            # fields are added as the background graph becomes available, so
+            # the results pane is usable while the tree is still building.
             raw, terms = self._searchTerms(query)
-            cacheKey = (raw, tuple(terms), bool(labels), bool(variables), bool(conditions), bool(links), bool(statements), bool(showInternal))
+            cacheKey = (raw, tuple(terms), bool(labels), bool(variables),
+                        bool(conditions), bool(links), bool(statements),
+                        bool(showInternal), self._buildRevision)
             if not raw:
                 self._searchBuildKey = None
                 self._searchBuilding = False
@@ -1407,7 +1466,7 @@ init -2 python in x52URM:
                 # background. Continue the same search at the newly appended
                 # node index instead of returning a prematurely complete
                 # result set.
-                if self._searchBuildIndex >= len(self.nodes):
+                if self._searchBuildIndex >= len(self._searchBuildNodes):
                     return self._searchAllResults
                 self._searchBuilding = True
                 return self._searchAllResults
