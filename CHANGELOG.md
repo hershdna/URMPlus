@@ -1,5 +1,14 @@
 # Changelog
 
+## [v47] - 2026-09-11
+
+### Fixed
+
+- Removed the remaining build-time sensitivity gate from the Label Tree
+  search input. Queries can now be entered and label-name results displayed
+  immediately while the detailed AST graph continues to build in the
+  background.
+
 ## [v46] - 2026-09-11
 
 ### Fixed
