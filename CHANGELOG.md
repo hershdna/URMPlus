@@ -1,5 +1,15 @@
 # Changelog
 
+## [v48] - 2026-09-11
+
+### Fixed
+
+- Multi-term searches now require every term to occur in the same enabled
+  field. For example, `nurse replay` matches `replay_nurse`, but does not
+  match a label whose second term appears only in unrelated node details.
+- Label Tree reapplies the saved horizontal and vertical viewport offsets
+  every time the screen is reopened, not only the first time it is shown.
+
 ## [v47] - 2026-09-11
 
 ### Fixed
