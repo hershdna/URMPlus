@@ -26,6 +26,7 @@ init -2 python in x52URM:
             self._signature = None
             self.xAdjustment = ui.adjustment()
             self.yAdjustment = ui.adjustment()
+            self.searchResultsAdjustment = ui.adjustment()
             self.graphWidth = 900
             self.graphHeight = 600
             self._focusToken = None
@@ -74,7 +75,7 @@ init -2 python in x52URM:
             self._viewportPersistentPending = False
             self._viewportPersistentDue = 0
             self._viewportRestorePending = True
-            self._viewportLastObserved = (None, None)
+            self._viewportLastObserved = (None, None, None)
             self._labelNamesCache = None
             self._branchCache = {}
 
@@ -537,10 +538,11 @@ init -2 python in x52URM:
                                 '_x52URM_labeltree_viewport', None)
                 if isinstance(state, dict):
                     return (self._safeOffset(state.get('x', 0)),
-                            self._safeOffset(state.get('y', 0)))
+                            self._safeOffset(state.get('y', 0)),
+                            self._safeOffset(state.get('searchY', 0)))
             except:
                 pass
-            return (0.0, 0.0)
+            return (0.0, 0.0, 0.0)
 
         def noteViewportPosition(self):
             """Queue the current graph offsets with the search preferences.
@@ -554,13 +556,16 @@ init -2 python in x52URM:
                 return
             x = self._safeOffset(getattr(self.xAdjustment, 'value', 0))
             y = self._safeOffset(getattr(self.yAdjustment, 'value', 0))
-            observed = (x, y)
+            searchY = self._safeOffset(getattr(self.searchResultsAdjustment,
+                                                'value', 0))
+            observed = (x, y, searchY)
             if observed == self._viewportLastObserved:
                 return
             self._viewportLastObserved = observed
             try:
                 setattr(renpy.game.persistent,
-                        '_x52URM_labeltree_viewport', {'x': x, 'y': y})
+                        '_x52URM_labeltree_viewport',
+                        {'x': x, 'y': y, 'searchY': searchY})
                 self._viewportPersistentPending = True
                 self._viewportPersistentDue = time.time() + .35
             except:
@@ -569,20 +574,21 @@ init -2 python in x52URM:
         def _applySavedViewportPosition(self):
             if not self._viewportRestorePending:
                 return False
-            x, y = self._savedViewportState()
+            x, y, searchY = self._savedViewportState()
             try:
                 self.xAdjustment.value = x
                 self.yAdjustment.value = y
+                self.searchResultsAdjustment.value = searchY
             except:
                 return False
             self._viewportRestorePending = False
-            self._viewportLastObserved = (x, y)
+            self._viewportLastObserved = (x, y, searchY)
             return True
 
         def beginViewportSession(self):
             """Restore the saved viewport whenever Label Tree is reopened."""
             self._viewportRestorePending = True
-            self._viewportLastObserved = (None, None)
+            self._viewportLastObserved = (None, None, None)
             try:
                 renpy.restart_interaction()
             except:
@@ -1805,6 +1811,7 @@ screen URM_labeltree_content():
                             mousewheel True
                             draggable True
                             scrollbars 'vertical'
+                            yadjustment x52URM.LabelTree.searchResultsAdjustment
                             vbox:
                                 for result in allSearchResults:
                                     button:
